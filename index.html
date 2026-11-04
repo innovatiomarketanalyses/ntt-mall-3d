@@ -1,0 +1,939 @@
+<meta charset="utf-8">
+<title>NTT Mall 3D</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* One-screen viewer: full-bleed 3D canvas, small title top-left, view and light controls bottom. */
+:root { --bg:#d9d2c6; --panel:rgba(251,250,248,.9); --fg:#23201c; --line:#cfc9bf; --accent:#9a6540; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#17150f; --panel:rgba(31,28,22,.9); --fg:#ece7de; --line:#3a362d; --accent:#c58a5c; color-scheme: dark; } }
+:root[data-theme="dark"] { --bg:#17150f; --panel:rgba(31,28,22,.9); --fg:#ece7de; --line:#3a362d; --accent:#c58a5c; color-scheme: dark; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui-monospace, monospace; overflow: hidden; }
+#stage { position: absolute; inset: 0; touch-action: none; cursor: grab; }
+#stage:active { cursor: grabbing; }
+canvas { display: block; width: 100%; height: 100%; }
+.title { position: absolute; top: 12px; left: max(16px, env(safe-area-inset-left, 0px)); background: var(--panel); border: 1px solid var(--line); padding: 8px 12px; pointer-events: none; }
+.title b { font-family: "Barlow Condensed", "Arial Narrow", sans-serif; font-size: 22px; letter-spacing: .04em; text-transform: uppercase; display: block; line-height: 1; }
+.title span { font-size: 11px; opacity: .7; }
+.bar { position: absolute; bottom: 12px; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; pointer-events: none; }
+.grp { display: flex; flex-wrap: wrap; gap: 4px; background: var(--panel); border: 1px solid var(--line); padding: 4px; pointer-events: auto; }
+button { font: 500 12px "IBM Plex Mono", monospace; color: var(--fg); background: transparent; border: 1px solid transparent; padding: 7px 10px; cursor: pointer; }
+button:hover { border-color: var(--line); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.hint { position: absolute; top: 12px; right: max(16px, env(safe-area-inset-right, 0px)); font-size: 11px; background: var(--panel); border: 1px solid var(--line); padding: 8px 10px; pointer-events: none; }
+@media (max-width: 560px) { .hint { display: none; } }
+#card { position: absolute; top: 64px; left: max(16px, env(safe-area-inset-left, 0px)); max-width: min(320px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 10px 12px; font-size: 12px; line-height: 1.5; pointer-events: none; }
+#card b { font-family: "Barlow Condensed", "Arial Narrow", sans-serif; font-size: 20px; letter-spacing: .03em; text-transform: uppercase; display: block; line-height: 1.1; }
+#card[hidden] { display: none; }
+</style>
+
+<div id="stage"></div>
+<div class="title"><b>NTT Mall</b><span>Concept render v1.3 · 100 × 100 m</span></div>
+<div class="hint">Drag to orbit · scroll or pinch to zoom · click any building</div>
+<div id="card" hidden><b id="ct"></b><span id="cd"></span></div>
+<div class="bar">
+  <div class="grp" id="views" role="group" aria-label="Views">
+    <button data-v="street" aria-pressed="true">From N4</button>
+    <button data-v="gate" aria-pressed="false">Gate</button>
+    <button data-v="mall" aria-pressed="false">Mall</button>
+    <button data-v="rear" aria-pressed="false">Rear</button>
+    <button data-v="station" aria-pressed="false">Fuel</button>
+    <button data-v="yard" aria-pressed="false">Trucks</button>
+    <button data-v="aerial" aria-pressed="false">Aerial</button>
+  </div>
+  <div class="grp" id="inst" role="group" aria-label="Institute">
+    <button data-i="0" aria-pressed="true">Institute closed</button>
+    <button data-i="1" aria-pressed="false">Open interior</button>
+  </div>
+  <div class="grp" id="modes" role="group" aria-label="Light">
+    <button data-m="day" aria-pressed="false">Day</button>
+    <button data-m="dusk" aria-pressed="true">Dusk</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.25;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  stage.appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(45, 1, 0.5, 900);
+  var root = new THREE.Group();
+  scene.add(root);
+
+  /* ---------- materials ---------- */
+  function M(c, o) { var m = new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: 0.8, metalness: 0 }, o || {})); m.color.convertSRGBToLinear(); if (o && o.emissive !== undefined) m.emissive.convertSRGBToLinear(); return m; }
+  var mat = {
+    conc: M(0xa9a59d), stone: M(0xc9c3b6), timber: M(0x9a6540, { roughness: 0.6 }), dtimber: M(0x4a3222, { roughness: 0.7 }),
+    dark: M(0x2c2b2b), asph: M(0x3a3a3d, { roughness: 0.95 }), pave: M(0xcfc8bb), paveD: M(0xb7b0a2), grass: M(0x6f8a58),
+    white: M(0xf2efe8), yellow: M(0xe0ac2c, { roughness: 0.5 }), steel: M(0x8b949c, { metalness: 0.3, roughness: 0.5 }),
+    wh: M(0xb9c0c6, { roughness: 0.6, metalness: 0.2 }), green: M(0x5f8a4e), line: M(0xf4f1e8), water: M(0x6fb3d6, { roughness: 0.1, metalness: 0.2 }),
+    solar: M(0x1d2a45, { roughness: 0.25, metalness: 0.5 }),
+    glass: M(0xa9c4d0, { transparent: true, opacity: 0.35, roughness: 0.1 }),
+    glow: M(0xffd9a0, { emissive: 0xffb766, emissiveIntensity: 1, roughness: 0.5 }),
+    lamp: M(0xfff0c8, { emissive: 0xffe2a0, emissiveIntensity: 2, roughness: 0.5 }),
+    blue: M(0x2f6fa3, { roughness: 0.5 }),
+    corten: M(0xa8502c, { roughness: 0.55, metalness: 0.4 }), steelD: M(0x2f3438, { roughness: 0.5, metalness: 0.5 }),
+    sg: M(0xffe6b8, { transparent: true, opacity: 0.32, roughness: 0.08, emissive: 0xffb766, emissiveIntensity: 0.18 }),
+    panel: M(0xfff0d0, { emissive: 0xffe2b0, emissiveIntensity: 0.9, roughness: 0.6 }),
+    screen: M(0x6fa8ff, { emissive: 0x4a86e0, emissiveIntensity: 1.3, roughness: 0.3 }),
+    vault: M(0xbfd8e0, { transparent: true, opacity: 0.22, roughness: 0.1, side: THREE.DoubleSide })
+  };
+
+  function stripeTex() {
+    var c = document.createElement('canvas'); c.width = 32; c.height = 4; var x = c.getContext('2d');
+    x.fillStyle = '#a56d45'; x.fillRect(0, 0, 18, 4); x.fillStyle = '#6b4128'; x.fillRect(18, 0, 14, 4);
+    var t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / 0.6, 1); t.encoding = THREE.sRGBEncoding; return t;
+  }
+  mat.fins = M(0xffffff, { map: stripeTex(), roughness: 0.65 });
+
+  function B(x, y, w, d, h, m, e, cast) {
+    var g = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    g.position.set(x + w / 2 - 50, (e || 0) + h / 2, y + d / 2 - 50);
+    g.castShadow = cast !== false; g.receiveShadow = true; root.add(g); return g;
+  }
+  function P(x, y, e) { return new THREE.Vector3(x - 50, e || 0, y - 50); }
+  function tex(text, w, h, bg, fg) {
+    var c = document.createElement('canvas'); c.width = 512; c.height = Math.max(32, Math.round(512 * h / w));
+    var x = c.getContext('2d'); x.fillStyle = bg; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = fg; x.font = '700 ' + Math.round(c.height * 0.58) + 'px "Barlow Condensed", "Arial Narrow", sans-serif';
+    x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(text.toUpperCase(), c.width / 2, c.height / 2 + 2);
+    var t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.anisotropy = 4; return t;
+  }
+  var signMats = [];
+  function sign(text, cx, cy, e, w, h, bg, fg, emissive, rot) {
+    var m = new THREE.MeshStandardMaterial({ map: tex(text, w, h, bg, fg), roughness: 0.6 });
+    if (emissive) { m.emissive = new THREE.Color(0xffffff); m.emissiveMap = m.map; m.emissiveIntensity = 0.5; signMats.push(m); }
+    var p = new THREE.Mesh(new THREE.PlaneGeometry(w, h), m);
+    p.position.copy(P(cx, cy, e)); if (rot) p.rotation.y = rot; root.add(p); return p;
+  }
+  // timber panel with pill-shaped openings, front face at plan-y
+  function panel(x0, x1, y, e, h, holes, m) {
+    var w = x1 - x0, s = new THREE.Shape(); s.moveTo(0, 0); s.lineTo(w, 0); s.lineTo(w, h); s.lineTo(0, h); s.closePath();
+    holes.forEach(function (H) {
+      var p = new THREE.Path(), a = H[0] - x0, b = H[1] - x0, c = H[2], d = H[3], r = (d - c) / 2;
+      p.moveTo(a + r, c); p.lineTo(b - r, c); p.absarc(b - r, c + r, r, -Math.PI / 2, Math.PI / 2, false);
+      p.lineTo(a + r, d); p.absarc(a + r, c + r, r, Math.PI / 2, Math.PI * 1.5, false); s.holes.push(p);
+    });
+    var g = new THREE.ExtrudeGeometry(s, { depth: 0.35, bevelEnabled: false });
+    var mesh = new THREE.Mesh(g, m); mesh.position.set(x0 - 50, e, y - 50); mesh.castShadow = true; mesh.receiveShadow = true; root.add(mesh);
+  }
+
+  var seed = 11; function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+
+  /* ---------- sky + lights ---------- */
+  var hemi = new THREE.HemisphereLight(0xffffff, 0x777766, 1);
+  var sun = new THREE.DirectionalLight(0xffffff, 1);
+  sun.castShadow = true; sun.shadow.mapSize.set(8192, 8192);
+  var sc = sun.shadow.camera; sc.left = -80; sc.right = 80; sc.top = 80; sc.bottom = -80; sc.near = 1; sc.far = 500;
+  sun.shadow.bias = -0.0005;
+  scene.add(hemi, sun);
+
+  function gradient(top, bottom) {
+    var c = document.createElement('canvas'); c.width = 4; c.height = 256; var x = c.getContext('2d');
+    var g = x.createLinearGradient(0, 0, 0, 256); g.addColorStop(0, top); g.addColorStop(1, bottom);
+    x.fillStyle = g; x.fillRect(0, 0, 4, 256); var t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+  }
+  var MODES = {
+    day:  { top: '#74aee0', bot: '#e9f0f4', fog: 0xdfe9ef, sun: 0xfff1d6, si: 3.0, pos: [-30, 90, 110], hi: 1.3, hs: 0xdbe9f5, glow: 0.15, lamp: 0, sign: 0.1 },
+    dusk: { top: '#5d6fa3', bot: '#f4b184', fog: 0xe7a77f, sun: 0xffb272, si: 3.0, pos: [-120, 34, 80], hi: 0.95, hs: 0xc4b8b0, glow: 1.1, lamp: 1.5, sign: 0.9 }
+  };
+  function setMode(k) {
+    var m = MODES[k];
+    scene.background = gradient(m.top, m.bot);
+    scene.fog = new THREE.Fog(m.fog, 200, 620); scene.fog.color.convertSRGBToLinear();
+    sun.color.setHex(m.sun); sun.intensity = m.si; sun.position.set(m.pos[0], m.pos[1], m.pos[2]);
+    hemi.intensity = m.hi; hemi.color.setHex(m.hs);
+    mat.glow.emissiveIntensity = m.glow; mat.lamp.emissiveIntensity = m.lamp;
+    signMats.forEach(function (s) { s.emissiveIntensity = m.sign; });
+    document.querySelectorAll('#modes button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.m === k ? 'true' : 'false'); });
+  }
+
+  /* ---------- vehicles, people, trees ---------- */
+  function person(x, y, e) {
+    var g = new THREE.Group(), c = [0x3b4a6b, 0x8a3b3b, 0x2f5b4a, 0xb8a27a, 0x555555][Math.floor(rnd() * 5)];
+    var b = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.25, 1.2, 8), M(c)); b.position.y = 0.6;
+    var h = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), M(0xc99a77)); h.position.y = 1.4;
+    g.add(b, h); g.position.copy(P(x, y, e)); g.traverse(function (o) { o.castShadow = true; }); root.add(g); return g;
+  }
+  var walkers = [], movers = [];
+  function car(color) {
+    var g = new THREE.Group();
+    var b = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.8, 4.2), M(color, { roughness: 0.35, metalness: 0.4 })); b.position.y = 0.65;
+    var t = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.7, 2.3), M(0x222a30, { roughness: 0.2, metalness: 0.2 })); t.position.set(0, 1.35, -0.2);
+    var hl = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 0.05), mat.lamp); hl.position.set(0, 0.7, 2.12);
+    var tl = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 0.05), M(0xaa1111, { emissive: 0x880000, emissiveIntensity: 0.8 })); tl.position.set(0, 0.7, -2.12);
+    [[-0.95, 1.3], [0.95, 1.3], [-0.95, -1.3], [0.95, -1.3]].forEach(function (w) {
+      var wh = new THREE.Mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.25, 10), mat.dark); wh.rotation.z = Math.PI / 2; wh.position.set(w[0], 0.33, w[1]); g.add(wh);
+    });
+    g.add(b, t, hl, tl); g.traverse(function (o) { o.castShadow = true; }); return g;
+  }
+  function semi(color, tanker) {
+    var g = new THREE.Group();
+    var cab = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.8, 2.4), M(color, { roughness: 0.4 })); cab.position.set(0, 1.9, 0);
+    var win = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.9, 0.05), mat.glass); win.position.set(0, 2.6, 1.22);
+    var hl = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.2, 0.05), mat.lamp); hl.position.set(0, 1.0, 1.22);
+    var chassis = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.4, 14), mat.dark); chassis.position.set(0, 0.8, -5.5);
+    var trailer;
+    if (tanker) { trailer = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, 10, 16), M(0xc9ced2, { metalness: 0.5, roughness: 0.35 })); trailer.rotation.x = Math.PI / 2; trailer.position.set(0, 2.3, -7.2); }
+    else { trailer = new THREE.Mesh(new THREE.BoxGeometry(2.5, 3.2, 12.2), mat.white); trailer.position.set(0, 2.5, -7.4); }
+    g.add(cab, win, hl, chassis, trailer);
+    [[0, 0.5], [0, -9.8], [0, -11.2], [0, -12.6]].forEach(function (w) {
+      var wh = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2.5, 10), mat.dark); wh.rotation.z = Math.PI / 2; wh.position.set(w[0], 0.5, w[1]); g.add(wh);
+    });
+    g.traverse(function (o) { o.castShadow = true; }); return g;
+  }
+  var CARCOL = [0x9aa3a8, 0x1f2a36, 0xd8d6d0, 0x7a2b2b, 0x2d4a6b, 0x3a3a3a, 0xc9b27a];
+  function park(x, y, rot) { var c = car(CARCOL[Math.floor(rnd() * CARCOL.length)]); c.position.copy(P(x, y)); c.rotation.y = rot; root.add(c); return c; }
+  function put(g, x, y, rot) { g.position.copy(P(x, y)); g.rotation.y = rot; root.add(g); return g; }
+  function tree(x, y, s) {
+    s = s || 1; var g = new THREE.Group(), greens = [0x3f6b36, 0x4f7a40, 0x5c8a45, 0x6b8f3f, 0x477036];
+    var t = new THREE.Mesh(new THREE.CylinderGeometry(0.18 * s, 0.32 * s, 3.2 * s, 7), M(0x5a4030)); t.position.y = 1.6 * s; g.add(t);
+    for (var k = 0; k < 6; k++) {
+      var a = k / 6 * Math.PI * 2, r = k === 0 ? 0 : 1.1 * s, cr = new THREE.Mesh(new THREE.IcosahedronGeometry((1.5 + rnd() * 0.7) * s, 2), M(greens[Math.floor(rnd() * 5)], { roughness: 0.95 }));
+      cr.position.set(Math.cos(a) * r, (3.9 + rnd() * 1.3) * s, Math.sin(a) * r); cr.scale.y = 0.85; g.add(cr);
+    }
+    g.traverse(function (o) { o.castShadow = true; o.receiveShadow = true; }); g.position.copy(P(x, y)); root.add(g);
+  }
+  function lampPost(x, y, h) { h = h || 8; B(x, y, 0.25, 0.25, h, mat.steel); B(x - 0.4, y - 0.4, 1.0, 1.0, 0.2, mat.lamp, h - 0.1, false); }
+
+  /* ---------- art, picking, curved elements ---------- */
+  var pickables = [], roofParts = [], sculpt = null, open = false;
+  var instRooms = new THREE.Group(); instRooms.visible = false; root.add(instRooms);
+  function pick(x, y, w, d, h, e, t, desc, group) {
+    var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial({ visible: false }));
+    m.position.set(x + w / 2 - 50, e + h / 2, y + d / 2 - 50); m.userData = { t: t, d: desc, group: group || '' };
+    root.add(m); pickables.push(m); return m;
+  }
+  function mural(w, h, sd) {
+    var c = document.createElement('canvas'); c.width = Math.round(w * 48); c.height = Math.round(h * 48); var x = c.getContext('2d');
+    var pal = ['#c8572c', '#e0a030', '#1f6f78', '#f2e6cf', '#2b2220', '#8fb08a'], k = sd;
+    function r() { k = (k * 16807) % 2147483647; return k / 2147483647; }
+    x.fillStyle = pal[sd % 3 === 0 ? 3 : (sd % 3 === 1 ? 2 : 0)]; x.fillRect(0, 0, c.width, c.height);
+    for (var i = 0; i < Math.round(w * 1.4); i++) {
+      var cx = r() * c.width, cy = r() * c.height, R = c.height * (0.25 + r() * 0.5), t = Math.floor(r() * 3);
+      for (var j = 0; j < 4; j++) {
+        x.fillStyle = pal[Math.floor(r() * 6)]; x.beginPath();
+        if (t === 0) x.arc(cx, cy, R * (1 - j * 0.23), 0, 6.283);
+        else if (t === 1) { x.moveTo(cx - R * (1 - j * 0.2), cy + R * 0.7); x.lineTo(cx, cy - R * (1 - j * 0.2)); x.lineTo(cx + R * (1 - j * 0.2), cy + R * 0.7); }
+        else x.rect(cx - R * (1 - j * 0.22), cy - R * 0.5 * (1 - j * 0.22), 2 * R * (1 - j * 0.22), R * (1 - j * 0.22));
+        x.fill();
+      }
+    }
+    x.strokeStyle = pal[4]; x.lineWidth = c.height * 0.04; x.beginPath();
+    for (var q = 0; q < c.width; q += 4) { var yy = c.height * 0.88 + Math.sin(q * 0.05) * c.height * 0.05; if (q) x.lineTo(q, yy); else x.moveTo(q, yy); }
+    x.stroke();
+    var tx = new THREE.CanvasTexture(c); tx.encoding = THREE.sRGBEncoding; tx.anisotropy = 4;
+    return new THREE.MeshStandardMaterial({ map: tx, roughness: 0.8 });
+  }
+  function archShape(w, h, hole) {
+    var s = new THREE.Shape(); s.moveTo(0, 0); s.lineTo(w, 0); s.lineTo(w, h - w / 2); s.absarc(w / 2, h - w / 2, w / 2, 0, Math.PI, false); s.lineTo(0, 0); return s;
+  }
+  function arch(x0, w, y, e, h, depth, m, flip) {
+    var g = new THREE.ExtrudeGeometry(archShape(w, h), { depth: depth, bevelEnabled: false }), me = new THREE.Mesh(g, m);
+    me.position.set(flip ? x0 + w - 50 : x0 - 50, e, y - 50); if (flip) me.rotation.y = Math.PI; me.castShadow = true; me.receiveShadow = true; root.add(me); return me;
+  }
+  function awning(x0, w, y, e, m, flip) {
+    var R = w / 2, t = 0.22, s = new THREE.Shape();
+    s.moveTo(-R, 0); s.absarc(0, 0, R, Math.PI, 0, true); s.lineTo(R - t, 0); s.absarc(0, 0, R - t, 0, Math.PI, false); s.lineTo(-R, 0);
+    var g = new THREE.ExtrudeGeometry(s, { depth: 2.3, bevelEnabled: false }), me = new THREE.Mesh(g, m);
+    me.scale.y = 0.42; me.position.set(x0 + R - 50, e, y - 50); if (flip) me.rotation.y = Math.PI; me.castShadow = true; me.receiveShadow = true; root.add(me); return me;
+  }
+  function portal(y, flip, m) {
+    var s = new THREE.Shape(); s.moveTo(0, 0); s.lineTo(8.8, 0); s.lineTo(8.8, 11.2); s.lineTo(0, 11.2); s.lineTo(0, 0);
+    var h = new THREE.Path(); h.moveTo(0.7, 0.2); h.lineTo(8.1, 0.2); h.lineTo(8.1, 5.5); h.absarc(4.4, 5.5, 3.7, 0, Math.PI, false); h.lineTo(0.7, 0.2); s.holes.push(h);
+    var me = new THREE.Mesh(new THREE.ExtrudeGeometry(s, { depth: 0.6, bevelEnabled: false }), m);
+    me.position.set(flip ? 70 - 50 : 61.2 - 50, -0.2, y - 50); if (flip) me.rotation.y = Math.PI; me.castShadow = true; me.receiveShadow = true; root.add(me);
+  }
+  function bar(a, b, r, m) {
+    var d = new THREE.Vector3().subVectors(b, a), L = d.length(), g = new THREE.Mesh(new THREE.CylinderGeometry(r, r, L, 8), m);
+    g.position.copy(a).addScaledVector(d, 0.5); g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()); g.castShadow = true; root.add(g); return g;
+  }
+  function node(p, r, m) { var n = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 8), m); n.position.copy(p); n.castShadow = true; root.add(n); return n; }
+  function steelTree(x, y, top, sx, sy, r, m) {
+    var k = P(x, y, top * 0.55); bar(P(x, y, 0), k, r * 1.5, m); node(k, r * 2, m);
+    [[1, 1], [-1, 1], [1, -1], [-1, -1]].forEach(function (q) { var t = P(x + q[0] * sx, y + q[1] * sy, top); bar(k, t, r, m); node(t, r * 1.8, m); });
+  }
+  function archCurve(cx, y, a, hgt, n) {
+    var pts = []; for (var i = 0; i <= n; i++) { var u = -a + 2 * a * i / n; pts.push(P(cx + u, y, hgt * Math.sqrt(Math.max(0, 1 - (u / a) * (u / a))))); } return new THREE.CatmullRomCurve3(pts);
+  }
+  function rib(cx, y, a, hgt, r, m) { var t = new THREE.Mesh(new THREE.TubeGeometry(archCurve(cx, y, a, hgt, 32), 48, r, 8, false), m); t.castShadow = true; root.add(t); return t; }
+  function gateFrames(y0, y1) {
+    for (var yy = y0 + 0.4; yy < y1; yy += 2.5) {
+      B(61.7, yy, 0.22, 0.22, 9.2, mat.corten); B(69.18, yy, 0.22, 0.22, 9.2, mat.corten); B(61.7, yy, 7.7, 0.22, 0.28, mat.corten, 9.0);
+      bar(P(61.8, yy + 0.1, 7.2), P(63.1, yy + 0.1, 9.0), 0.06, mat.corten); bar(P(69.3, yy + 0.1, 7.2), P(68.0, yy + 0.1, 9.0), 0.06, mat.corten);
+    }
+    [62.6, 65.6, 68.6].forEach(function (px) { B(px, y0 + 0.4, 0.16, y1 - y0 - 0.4, 0.2, mat.corten, 9.15); });
+    B(61.7, y0 + 0.3, 7.7, y1 - y0 - 0.3, 0.06, mat.vault, 9.3, false);
+  }
+  function pvRows(x0, x1, ya, yb, e) {
+    for (var y = ya; y + 2.0 <= yb; y += 2.7) {
+      var pv = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, 0.08, 2.0), mat.solar); pv.position.copy(P((x0 + x1) / 2, y + 1, e + 1.0)); pv.rotation.x = -0.3; pv.castShadow = true; root.add(pv); roofParts.push(pv);
+      roofParts.push(B(x0, y + 0.8, 0.14, 0.14, 1.0, mat.steelD, e)); roofParts.push(B(x1 - 0.14, y + 0.8, 0.14, 0.14, 1.0, mat.steelD, e));
+    }
+  }
+  function cubeFrame(h, r, m) {
+    var g = new THREE.Group(), a = [-h, h];
+    a.forEach(function (p) { a.forEach(function (q) {
+      var bx = new THREE.Mesh(new THREE.BoxGeometry(2 * h + 2 * r, 2 * r, 2 * r), m); bx.position.set(0, p, q); g.add(bx);
+      var by = new THREE.Mesh(new THREE.BoxGeometry(2 * r, 2 * h + 2 * r, 2 * r), m); by.position.set(p, 0, q); g.add(by);
+      var bz = new THREE.Mesh(new THREE.BoxGeometry(2 * r, 2 * r, 2 * h + 2 * r), m); bz.position.set(p, q, 0); g.add(bz);
+    }); });
+    g.traverse(function (o) { o.castShadow = true; }); return g;
+  }
+  function pergola(x0, x1, y0, y1, e) {
+    [[x0, y0], [x1 - 0.25, y0], [x0, y1 - 0.25], [x1 - 0.25, y1 - 0.25]].forEach(function (c) { B(c[0], c[1], 0.25, 0.25, e, mat.steelD); });
+    B(x0, y0, x1 - x0, 0.25, 0.35, mat.steelD, e); B(x0, y1 - 0.25, x1 - x0, 0.25, 0.35, mat.steelD, e);
+    for (var yy = y0; yy < y1; yy += 0.7) B(x0, yy, x1 - x0, 0.12, 0.12, mat.timber, e + 0.35);
+    var cw = 1.6, ci = 0;
+    for (var cx = x0 + 0.4; cx + cw < x1; cx += cw + 0.3) for (var cy = y0 + 0.4; cy + cw < y1; cy += cw + 0.3, ci++) if ((Math.round((cx - x0) / 1.9) + Math.round((cy - y0) / 1.9)) % 2 === 0) B(cx, cy, cw, cw, 0.06, mat.white, e + 0.5, false);
+  }
+  function pvHoop(x0, x1, ya, yb, e, rise, n) {
+    var span = yb - ya, SEG = 6, bw = (x1 - x0) / n;
+    for (var i = 0; i <= n; i++) {
+      var x = x0 + bw * i, pts = [];
+      for (var k = 0; k <= 20; k++) { var t = k / 20; pts.push(P(x, ya + span * t, e + rise * Math.sin(Math.PI * t))); }
+      var tb = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.07, 6, false), mat.steelD); tb.castShadow = true; root.add(tb); roofParts.push(tb);
+      if (i < n) for (var q = 0; q < SEG; q++) {
+        var t0 = q / SEG, t1 = (q + 1) / SEG, y0 = ya + span * t0, y1 = ya + span * t1, z0 = e + rise * Math.sin(Math.PI * t0), z1 = e + rise * Math.sin(Math.PI * t1);
+        var pv = new THREE.Mesh(new THREE.BoxGeometry(bw - 0.25, 0.08, Math.hypot(y1 - y0, z1 - z0) - 0.05), mat.solar);
+        pv.position.copy(P(x + bw / 2, (y0 + y1) / 2, (z0 + z1) / 2 + 0.05)); pv.rotation.x = -Math.atan2(z1 - z0, y1 - y0); pv.castShadow = true; root.add(pv); roofParts.push(pv);
+      }
+    }
+  }
+  var slats = [];
+  function slat(x, y, w, d, e0, e1, c) { slats.push([x, y, w, d, e0, e1, c]); }
+  function flushSlats() {
+    var im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M(0xffffff, { roughness: 0.6 }), slats.length), o = new THREE.Object3D(), col = new THREE.Color();
+    slats.forEach(function (q, i) {
+      o.position.set(q[0] + q[2] / 2 - 50, (q[4] + q[5]) / 2, q[1] + q[3] / 2 - 50); o.scale.set(q[2], q[5] - q[4], q[3]); o.updateMatrix();
+      im.setMatrixAt(i, o.matrix); im.setColorAt(i, col.setHex(q[6]).convertSRGBToLinear());
+    });
+    im.castShadow = true; im.receiveShadow = true; root.add(im);
+  }
+
+  /* ---------- institute interior, shop interiors, small exterior details ---------- */
+  var fbs = [];
+  function fb(x, y, w, d, z0, z1, c) { fbs.push([x, y, w, d, z0, z1, c]); }
+  function flushFB() {
+    var im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M(0xffffff, { roughness: 0.65 }), fbs.length), o = new THREE.Object3D(), col = new THREE.Color();
+    fbs.forEach(function (q, i) { o.position.set(q[0] + q[2] / 2 - 50, (q[4] + q[5]) / 2, q[1] + q[3] / 2 - 50); o.scale.set(q[2], q[5] - q[4], q[3]); o.updateMatrix(); im.setMatrixAt(i, o.matrix); im.setColorAt(i, col.setHex(q[6]).convertSRGBToLinear()); });
+    im.castShadow = false; im.receiveShadow = true; root.add(im); fbs = [];
+  }
+  function buildInterior() {
+    var UE = 5.9, TOP = 10.1, GH = 5.2;
+    function chair(x, y, back, c, dz) {
+      dz = dz || 0; fb(x, y, 0.42, 0.42, UE + dz + 0.44, UE + dz + 0.5, c); fb(x + 0.19, y + 0.19, 0.05, 0.05, UE + dz, UE + dz + 0.44, 0x333333);
+      if (back === 'E') fb(x + 0.38, y, 0.05, 0.42, UE + dz + 0.5, UE + dz + 0.95, c); else if (back === 'W') fb(x, y, 0.05, 0.42, UE + dz + 0.5, UE + dz + 0.95, c);
+      else if (back === 'N') fb(x, y, 0.42, 0.05, UE + dz + 0.5, UE + dz + 0.95, c); else fb(x, y + 0.38, 0.42, 0.05, UE + dz + 0.5, UE + dz + 0.95, c);
+    }
+    function desk(x, y, w, d, c) { fb(x, y, w, d, UE + 0.72, UE + 0.77, c); fb(x + 0.03, y + 0.03, 0.04, d - 0.06, UE, UE + 0.72, 0x6b6f73); fb(x + w - 0.07, y + 0.03, 0.04, d - 0.06, UE, UE + 0.72, 0x6b6f73); }
+    function floorT(x, y, w, d, c) { B(x, y, w, d, 0.03, M(c, { roughness: 0.9 }), UE, false); }
+    function board(x, y, d) { B(x, y, 0.06, d, 1.3, mat.white, UE + 0.95, false); B(x - 0.02, y - 0.04, 0.1, d + 0.08, 0.05, mat.steelD, UE + 0.9, false); B(x - 0.02, y - 0.04, 0.1, d + 0.08, 0.05, mat.steelD, UE + 2.2, false); }
+    function lampPanel(cx, cy, w, d) { B(cx - w / 2, cy - d / 2, w, d, 0.06, mat.panel, TOP - 0.42, false); }
+    function classroom(x0, y0, w, d, face, tint) {
+      floorT(x0, y0, w, d, tint); var W = face === 'W';
+      board(W ? x0 + 0.05 : x0 + w - 0.11, y0 + 0.5, d - 1.0);
+      desk(W ? x0 + 0.5 : x0 + w - 1.1, y0 + d / 2 - 0.6, 0.6, 1.2, 0x5a3a24);
+      for (var r = 0; ; r++) {
+        var off = 2.0 + r * 1.15; if (off + 0.9 > w) break;
+        var dx = W ? x0 + off : x0 + w - off - 0.55, cx = W ? dx + 0.7 : dx - 0.5;
+        for (var c = 0; c * 1.5 + 1.6 <= d; c++) { var yy = y0 + 0.45 + c * 1.5; desk(dx, yy, 0.55, 1.2, 0xc8a06a); chair(cx, yy + 0.05, W ? 'E' : 'W', 0x2f5b6b); chair(cx, yy + 0.7, W ? 'E' : 'W', 0x2f5b6b); }
+      }
+      for (var lx = x0 + 1.4; lx < x0 + w - 0.8; lx += 2.2) for (var ly = y0 + 1.4; ly < y0 + d - 0.8; ly += 2.6) lampPanel(lx, ly, 1.3, 0.5);
+    }
+    function lab(x0, y0, w, d) {
+      floorT(x0, y0, w, d, 0xb9bfc4);
+      for (var r = 0; r < 5; r++) { var dx = x0 + 0.9 + r * 1.8; for (var c = 0; c * 1.25 + 1.2 <= d; c++) { var yy = y0 + 0.3 + c * 1.25; desk(dx, yy, 0.7, 1.2, 0xdfe3e6); fb(dx + 0.3, yy + 0.4, 0.05, 0.5, UE + 0.77, UE + 1.2, 0x1a1a1a); B(dx + 0.36, yy + 0.43, 0.02, 0.44, 0.36, mat.screen, UE + 0.84, false); chair(dx + 0.85, yy + 0.4, 'E', 0x2d3a4a); } }
+      for (var lx = x0 + 1.4; lx < x0 + w - 0.8; lx += 2.2) for (var ly = y0 + 1.4; ly < y0 + d - 0.8; ly += 2.6) lampPanel(lx, ly, 1.3, 0.5);
+    }
+    var bk = (function () {
+      var c = document.createElement('canvas'); c.width = 512; c.height = 256; var x = c.getContext('2d'); x.fillStyle = '#2a1c12'; x.fillRect(0, 0, 512, 256);
+      var pal = ['#8a2b2b', '#2d4a6b', '#c9a24a', '#3f6b4a', '#d8d2c4', '#6b3f78', '#b5652f', '#1f3a4a'];
+      for (var row = 0; row < 5; row++) { var px = 2; while (px < 510) { var bw = 6 + Math.floor(rnd() * 9), bh = 34 + Math.floor(rnd() * 14); x.fillStyle = pal[Math.floor(rnd() * pal.length)]; x.fillRect(px, row * 51 + 48 - bh, bw, bh); px += bw + 1; } x.fillStyle = '#5a3a24'; x.fillRect(0, row * 51 + 48, 512, 4); }
+      var t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding; return t;
+    })();
+    function shelf(x, y, w, d, h, alongX) {
+      B(x, y, w, d, h, mat.dtimber, UE); var len = alongX ? w : d;
+      [0, 1].forEach(function (side) {
+        var t = bk.clone(); t.needsUpdate = true; t.repeat.set(len / 2, h / 2.5);
+        var p = new THREE.Mesh(new THREE.PlaneGeometry(len, h), new THREE.MeshStandardMaterial({ map: t, roughness: 0.8 }));
+        if (alongX) { p.position.copy(P(x + w / 2, side ? y + d + 0.01 : y - 0.01, UE + h / 2)); p.rotation.y = side ? 0 : Math.PI; }
+        else { p.position.copy(P(side ? x + w + 0.01 : x - 0.01, y + d / 2, UE + h / 2)); p.rotation.y = side ? Math.PI / 2 : -Math.PI / 2; }
+        root.add(p);
+      });
+    }
+    function library(x0, y0, w, d) {
+      floorT(x0, y0, w, d, 0x4a5a4a);
+      shelf(x0 + 0.15, y0 + 0.5, 0.4, d - 1, 3.4, false); shelf(x0 + 1.4, y0 + 4.0, w - 2.8, 0.4, 2.2, true); shelf(x0 + 1.4, y0 + 6.2, w - 2.8, 0.4, 2.2, true);
+      (w > 10 ? [[x0 + 3.2, y0 + 0.9], [x0 + 6.6, y0 + 0.9]] : [[x0 + 1.9, y0 + 1.2]]).forEach(function (t) {
+        desk(t[0], t[1], 2.8, 1.1, 0xb98a5a);
+        for (var k = 0; k < 3; k++) { chair(t[0] + 0.2 + k * 0.9, t[1] - 0.5, 'N', 0x3a4a5a); chair(t[0] + 0.2 + k * 0.9, t[1] + 1.2, 'S', 0x3a4a5a); }
+        B(t[0] + 1.2, t[1] + 0.4, 0.4, 0.3, 0.3, mat.panel, UE + 0.8, false);
+        for (var pl = 0; pl < 2; pl++) { B(t[0] + 0.4 + pl * 1.8, t[1] + 0.5, 0.03, 0.03, 2.4, mat.steelD, UE + 1.8, false); B(t[0] + 0.1 + pl * 1.8, t[1] + 0.35, 0.6, 0.35, 0.18, mat.panel, UE + 1.62, false); }
+      });
+      var px = x0 + w - 2.7; if (w > 10) B(px, y0 + 4.2, 0.1, 2.8, 2.4, mat.dtimber, UE); B(px, y0 + 4.2, 2.4, 0.1, 2.4, mat.dtimber, UE); B(px, y0 + 6.9, 2.4, 0.1, 2.4, mat.dtimber, UE); B(px - 0.05, y0 + 4.2, 2.6, 2.9, 0.1, mat.timber, UE + 2.4);
+      fb(px + 0.7, y0 + 4.5, 1.6, 0.6, UE + 0.4, UE + 0.8, 0x7a8a6a); B(px + 1.4, y0 + 5.4, 0.3, 0.3, 0.3, mat.lamp, UE + 1.0, false);
+      for (var lx = x0 + 1.6; lx < x0 + w - 0.8; lx += 2.6) for (var ly = y0 + 1.4; ly < y0 + d - 0.8; ly += 3.0) lampPanel(lx, ly, 1.4, 0.5);
+    }
+    function auditorium(x0, y0, w, d) {
+      floorT(x0, y0, w, d, 0x5a2626); B(x0 + w - 3.3, y0, 3.3, d, 0.45, mat.dtimber, UE);
+      B(x0 + w - 0.22, y0 + 1.0, 0.1, d - 2.0, 3.0, mat.screen, UE + 1.1, false); B(x0 + w - 0.27, y0 + 0.9, 0.06, d - 1.8, 0.1, mat.steelD, UE + 4.15, false);
+      B(x0 + w - 2.2, y0 + d / 2 - 0.4, 0.7, 0.8, 1.1, mat.timber, UE + 0.45);
+      for (var i = 0; i < 4; i++) {
+        var x = x0 + 1.0 + i * 1.0, dz = 0.12 * i; B(x - 0.15, y0, 1.0, d, 0.12 * (i + 1), M(0x5a2626, { roughness: 0.9 }), UE, false);
+        for (var j = 0; j < 8; j++) chair(x, y0 + 0.3 + j * 1.0 + (j >= 4 ? 0.7 : 0), 'W', 0x9a2f2f, 0.12 * (i + 1) - 0.0);
+      }
+      for (var ax = x0 + 0.5; ax < x0 + w - 3.5; ax += 0.4) { fb(ax, y0 + 0.02, 0.2, 0.08, UE + 0.3, UE + 3.6, 0x9a6540); fb(ax, y0 + d - 0.1, 0.2, 0.08, UE + 0.3, UE + 3.6, 0x9a6540); }
+      for (var lx = x0 + 1.2; lx < x0 + w - 0.5; lx += 2.0) for (var ly = y0 + 1.4; ly < y0 + d - 0.8; ly += 2.6) lampPanel(lx, ly, 1.0, 0.4);
+      for (var sp = 0; sp < 4; sp++) B(x0 + w - 3.8, y0 + 1.5 + sp * 2.2, 0.35, 0.35, 0.35, mat.lamp, TOP - 0.7, false);
+    }
+    function reception(x0, y0, w, d) {
+      floorT(x0, y0, w, d, 0xd8c9b0); fb(x0 + 0.5, y0 + 2.2, 3.4, 0.7, UE, UE + 1.1, 0x7a5236); fb(x0 + 0.5, y0 + 2.2, 0.7, 2.6, UE, UE + 1.1, 0x7a5236);
+      fb(x0 + 0.5, y0 + 2.2, 3.4, 0.9, UE + 1.1, UE + 1.15, 0xe8dcc8); B(x0 + 1.2, y0 + 1.6, 0.04, 2.2, 0.5, mat.lamp, UE + 1.9, false);
+      fb(x0 + 3.8, y0 + 6.2, 2.2, 0.8, UE, UE + 0.45, 0x3a4a5a); fb(x0 + 3.8, y0 + 6.2, 2.2, 0.2, UE, UE + 0.9, 0x3a4a5a); fb(x0 + 0.4, y0 + 7.4, 1.0, 1.0, UE, UE + 0.6, 0x8a9a7a);
+      lampPanel(x0 + 3, y0 + 4, 1.6, 0.6);
+    }
+    classroom(83.2, 84, 6.8, 7.6, 'E', 0xc9a77c); classroom(83.2, 91.6, 6.8, 5.4, 'E', 0xc9a77c); classroom(83.2, 74, 6.8, 5, 'E', 0xc9a77c); classroom(48, 86, 6.8, 11, 'W', 0xc9a77c);
+    classroom(48, 63.6, 6.8, 8.4, 'W', 0xc9a77c); classroom(69.6, 63.6, 6.8, 8.4, 'W', 0xc9a77c);
+    lab(69.6, 86, 10.4, 5.6); library(54.8, 86, 6.8, 11);
+    floorT(76.4, 66.5, 3.6, 5.5, 0xd8c9b0); fb(76.8, 68.0, 2.4, 0.7, UE, UE + 1.1, 0x7a5236); fb(76.8, 68.0, 0.7, 1.6, UE, UE + 1.1, 0x7a5236); fb(77.0, 70.8, 1.8, 0.8, UE, UE + 0.45, 0x3a4a5a); lampPanel(78.2, 69, 1.4, 0.6);
+    floorT(76.4, 63.6, 3.6, 2.9, 0xe6ecee); fb(76.7, 64.2, 0.9, 2.0, UE, UE + 0.55, 0xe8e8e8); fb(78.8, 64.0, 0.8, 1.0, UE, UE + 0.9, 0xcfd6da);
+    function wcRow(x0, y0, n, horiz, pitch) { for (var i = 0; i < n; i++) { var xx = horiz ? x0 + i * pitch : x0, yy = horiz ? y0 : y0 + i * pitch; fb(xx, yy, 0.4, 0.55, UE, UE + 0.4, 0xf4f4f2); fb(xx - 0.02, yy + 0.4, 0.44, 0.2, UE + 0.4, UE + 0.8, 0xf4f4f2); } }
+    // staff and direction block, east toilets
+    floorT(83.2, 68, 6.8, 4, 0xb9a688); fb(83.7, 69.0, 1.8, 0.8, UE, UE + 0.75, 0x7a5236); fb(86.2, 69.0, 1.8, 0.8, UE, UE + 0.75, 0x7a5236); fb(84.4, 70.9, 3.4, 0.9, UE, UE + 0.45, 0x3a4a5a);
+    fb(84.3, 64.4, 2.0, 0.9, UE, UE + 0.75, 0x7a5236); fb(88.6, 64.4, 0.4, 3.0, UE, UE + 1.9, 0x4a3222); lampPanel(86.5, 66, 1.4, 0.6);
+    floorT(83.2, 72, 6.8, 2, 0xd7e0e0); wcRow(83.6, 72.4, 2, true, 1.5); wcRow(88.0, 72.4, 1, true, 1.5);
+    floorT(83.2, 79, 6.8, 5, 0xd7e0e0); wcRow(85.6, 79.5, 3, true, 1.4); wcRow(85.6, 82.2, 1, true, 1.4); fb(85.2, 81.2, 0.8, 0.4, UE, UE + 0.35, 0xf4f4f2);
+    floorT(54.8, 63.6, 6.8, 8.4, 0xd7e0e0); wcRow(55.2, 64.2, 4, false, 0.9); wcRow(60.8, 69.0, 2, false, 1.0); fb(60.9, 71.0, 0.5, 0.8, UE, UE + 0.35, 0xf4f4f2);
+    floorT(69.6, 91.6, 10.4, 5.4, 0xb9a688); floorT(83.2, 63.6, 6.8, 4.4, 0xe6dcc8); floorT(54.8, 63.6, 6.8, 8.4, 0xd7e0e0);
+    [[48, 84, 13.6, 2], [61.6, 84, 8, 2], [69.6, 84, 10.4, 2], [48, 74, 2, 10], [48, 72, 13.6, 2], [61.6, 72, 8, 2], [69.6, 72, 10.4, 2], [80, 63.6, 3.2, 33.4]].forEach(function (g) { floorT(g[0], g[1], g[2], g[3], 0xd8cdb8); });
+    // management desks and chairs
+    desk(84.0, 64.8, 1.6, 0.8, 0x5a3a24); chair(84.5, 65.8, 'S', 0x2d3a4a); desk(87.6, 64.8, 1.6, 0.8, 0x5a3a24); chair(88.1, 65.8, 'S', 0x2d3a4a);
+    // WC stalls and cafe tables
+    [[57.2, 64.0], [58.7, 64.0], [60.2, 64.0], [57.2, 68.4], [58.7, 68.4], [60.2, 68.4]].forEach(function (c) { fb(c[0], c[1], 1.3, 0.1, UE, UE + 2.0, 0xd9e0e3); fb(c[0] + 0.4, c[1] + 0.3, 0.45, 0.6, UE, UE + 0.4, 0xffffff); });
+    [[71.5, 93.6], [74.5, 93.6], [77.5, 93.6]].forEach(function (c) { [[-0.95, 0, 'E'], [0.55, 0, 'W'], [-0.2, -0.75, 'S'], [-0.2, 0.7, 'N']].forEach(function (o) { chair(c[0] + o[0], c[1] + o[1] - 0.2, o[2], 0x2d3a4a); }); });
+    fb(70.0, 95.7, 9.0, 0.7, UE, UE + 1.05, 0x7a5236);
+    // glass and timber partitions with doors (gaps) matching the BIM plan
+    function seg(axis, fixed, a0, a1, gaps, m, h) {
+      var cur = a0; gaps = gaps.slice().sort(function (p, q) { return p[0] - q[0]; });
+      function put(u, v) { if (v - u < 0.05) return; if (axis === 'x') B(u, fixed - 0.06, v - u, 0.12, h, m, UE, false); else B(fixed - 0.06, u, 0.12, v - u, h, m, UE, false); }
+      gaps.forEach(function (g) { put(cur, g[0]); if (axis === 'x') B(g[0], fixed - 0.06, g[1] - g[0], 0.12, h - 2.2, m, UE + 2.2, false); else B(fixed - 0.06, g[0], 0.12, g[1] - g[0], h - 2.2, m, UE + 2.2, false); cur = g[1]; });
+      put(cur, a1);
+    }
+    seg('x', 86, 48.1, 61.4, [[54, 55.8]], mat.glass, 4.2); seg('x', 86, 69.6, 79.9, [[73.6, 74.6]], mat.glass, 4.2);
+    seg('x', 72, 48.1, 54.8, [[50.5, 51.5]], mat.glass, 4.2); seg('x', 72, 54.8, 57, [[55.3, 56.5]], mat.dtimber, 4.2);
+    seg('x', 72, 69.6, 76.4, [[72.1, 73.1]], mat.glass, 4.2); seg('x', 72, 76.4, 80, [[77.3, 78.3]], mat.glass, 4.2);
+    seg('y', 80, 86, 96.25, [[92, 93.6]], mat.dtimber, 4.2); seg('y', 80, 63.8, 72, [[65.8, 66.8]], mat.dtimber, 4.2); seg('y', 83.2, 63.8, 96.25, [[64.8, 65.8], [72.6, 73.6], [75.5, 76.5], [80.5, 81.5], [86.5, 87.5], [92.5, 93.5]], mat.dtimber, 4.2);
+    seg('x', 91.6, 69.6, 79.9, [], mat.glass, 4.2); seg('x', 91.6, 83.2, 89.9, [], mat.dtimber, 4.2); seg('x', 84, 83.2, 89.9, [], mat.dtimber, 4.2); seg('x', 74, 83.2, 89.9, [], mat.dtimber, 4.2);
+    seg('y', 54.8, 63.8, 72, [], mat.dtimber, 4.2); seg('y', 57, 63.8, 72, [[66.2, 67.2], [69.6, 70.6]], mat.dtimber, 4.2); seg('x', 66, 54.8, 57, [[55.3, 56.3]], mat.dtimber, 4.2); seg('x', 67.8, 57, 61.4, [], mat.dtimber, 4.2);
+    seg('y', 76.4, 63.8, 72, [], mat.dtimber, 4.2); seg('x', 66.5, 76.4, 80, [[77.3, 78.3]], mat.dtimber, 4.2); seg('x', 72, 83.2, 89.9, [[84.0, 85.0]], mat.dtimber, 4.2); seg('x', 81.7, 85.2, 89.9, [], mat.dtimber, 4.2); seg('x', 79, 83.2, 89.9, [], mat.dtimber, 4.2); seg('x', 68, 83.2, 89.9, [], mat.dtimber, 4.2);
+    // timber ceiling beams under the roof
+    [[48, 84, 13.6, 13], [69.6, 84, 20.4, 13], [48, 63.6, 13.6, 10.4], [69.6, 63.6, 20.4, 10.4], [80, 74, 10, 10], [48, 74, 2, 10]].forEach(function (r) { for (var bx = r[0] + 0.8; bx < r[0] + r[2]; bx += 1.7) B(bx, r[1] + 0.2, 0.16, r[3] - 0.4, 0.35, mat.timber, TOP - 0.35, false); });
+    // shop interiors: shelving, counters, ceiling lights, so lit shops read through the glass
+    var xs2 = [48, 54.8, 69.6, 76.4, 83.2], pal = [0xd9603b, 0x3b7bd9, 0xe0b53a, 0x4aa36b, 0xcfcfcf, 0x9a5bd0];
+    xs2.forEach(function (x, s) {
+      [[84.5, 11], [64.4, 9.5]].forEach(function (ro) {
+        if (s === 1 && ro[0] === 64.4) return;
+        var y0 = ro[0], dd = ro[1];
+        [x + 0.25, x + 6.8 - 0.65].forEach(function (sx) { fb(sx, y0 + 0.6, 0.4, dd - 1.4, 0, 2.3, 0x6a5a48);
+          for (var lv = 0; lv < 4; lv++) for (var it = 0; it < 9; it++) fb(sx + (sx < x + 3 ? 0.4 : -0.18), y0 + 0.7 + it * ((dd - 1.6) / 9), 0.18, (dd - 1.6) / 11, 0.2 + lv * 0.55, 0.2 + lv * 0.55 + 0.3 + (it % 3) * 0.08, pal[(it + lv + s) % 6]); });
+        fb(x + 2.2, y0 + dd / 2 - 0.3, 2.4, 0.6, 0, 1.05, 0x3a2a20); fb(x + 2.2, y0 + dd / 2 - 0.3, 2.4, 0.7, 1.05, 1.1, 0xe8dcc8);
+        fb(x + 2.4, y0 + 1.6, 1.8, 0.9, 0, 0.8, 0x8a6a48);
+        B(x + 3.3, y0 + 0.8, 0.2, dd - 1.6, 0.08, mat.panel, 4.8, false);
+      });
+    });
+    // courtyard and front details: bollards, benches, planters, pendant lights under canopies, boundary wall
+    for (var bo = 49; bo < 90; bo += 2.4) { if (bo > 60 && bo < 71) continue; fb(bo, 98.9, 0.18, 0.18, 0.1, 0.85, 0x2f3438); }
+    [[50.5, 97.6], [86.6, 97.6]].forEach(function (c) { fb(c[0], c[1], 2.0, 0.5, 0.42, 0.5, 0x9a6540); fb(c[0] + 0.1, c[1] + 0.05, 0.1, 0.4, 0, 0.42, 0x2f3438); fb(c[0] + 1.8, c[1] + 0.05, 0.1, 0.4, 0, 0.42, 0x2f3438); });
+    [[59.6, 97.5], [70.4, 97.5]].forEach(function (c) { B(c[0], c[1], 1.1, 1.1, 0.7, mat.conc); tree(c[0] + 0.55, c[1] + 0.55, 0.4); });
+    xs2.forEach(function (x, s) { var ce = 4.3 + 0.4 * (s % 2); B(x + 1.2, 95.2, 0.3, 0.3, 0.12, mat.lamp, ce - 0.15, false); B(x + 4.6, 95.2, 0.3, 0.3, 0.12, mat.lamp, ce - 0.15, false); B(x + 1.2, 63.6, 0.3, 0.3, 0.12, mat.lamp, 4.15, false); B(x + 4.6, 63.6, 0.3, 0.3, 0.12, mat.lamp, 4.15, false); });
+    B(-0.3, -0.3, 0.3, 100.3, 2.2, mat.stone); B(100, -0.3, 0.3, 45, 2.2, mat.stone); B(-0.3, -0.3, 100.6, 0.3, 2.2, mat.stone);
+    for (var fx = 0; fx < 40; fx += 1.5) { if ((fx > 3 && fx < 13) || (fx > 19 && fx < 29)) continue; B(fx, 99.8, 0.08, 0.08, 1.5, mat.steelD, 0, false); }
+    // customers / trucks / fuel kept apart: steel fences, gates, guard house, signs
+    B(41, 44.9, 25, 0.12, 2.2, mat.steelD); B(67.2, 44.9, 20, 0.12, 2.2, mat.steelD); B(90.95, 46, 0.12, 54, 2.2, mat.steelD); B(40.4, 46, 0.12, 54, 1.2, mat.steelD);
+    B(40.5, 46, 0.9, 54, 0.1, mat.green, 0.1, false);
+    B(95, 78, 2, 6, 3, mat.white); B(94.6, 77.6, 2.8, 6.8, 0.25, mat.steelD, 3.0); B(92, 78.8, 3, 0.1, 0.1, mat.yellow, 1.0, false); B(97, 78.8, 3, 0.1, 0.1, mat.yellow, 1.0, false);
+    B(94.9, 85, 2.2, 8, 0.15, mat.green, 0.1, false);
+    [[8, 'Posto · Entrada'], [24, 'Posto · Saída'], [44.5, 'Clientes'], [96, 'Camiões']].forEach(function (g, gi) { B(g[0] - 0.1, 98.4, 0.2, 0.2, 3.2, mat.steelD); sign(g[1], g[0], 98.6, 3.0, 4.2, 0.9, gi === 3 ? '#c8572c' : (gi < 2 ? '#e0ac2c' : '#2f6fa3'), gi === 3 ? '#ffffff' : (gi < 2 ? '#23201c' : '#ffffff'), false); });
+    // public toilets for the shops and the institute: next to the central gate, entrance from the courtyard, stacked under the first-floor toilets
+    function wallP(x0, py0, x1, py1, gaps, h) { var vert = Math.abs(x1 - x0) < 0.01, a0 = vert ? py0 : x0, a1 = vert ? py1 : x1, cur = a0; gaps.concat([[a1, a1]]).forEach(function (g) { if (g[0] > cur) { if (vert) B(x0 - 0.06, cur, 0.12, g[0] - cur, h, mat.stone); else B(cur, py0 - 0.06, g[0] - cur, 0.12, h, mat.stone); } if (g[1] > g[0]) { if (vert) B(x0 - 0.06, g[0], 0.12, g[1] - g[0], h - 2.2, mat.stone, 2.2); else B(g[0], py0 - 0.06, g[1] - g[0], 0.12, h - 2.2, mat.stone, 2.2); } cur = g[1]; }); }
+    wallP(54.95, 73.9, 61.45, 73.9, [[55.3, 56.5]], GH); wallP(54.95, 64.1, 61.45, 64.1, [], GH);
+    wallP(57, 64.2, 57, 73.8, [[67.0, 68.0], [70.4, 71.4]], GH); wallP(55, 66.55, 57, 66.55, [[55.4, 56.4]], GH); wallP(57, 68.9, 61.45, 68.9, [], GH);
+    B(55, 64.2, 6.4, 9.6, 0.04, M(0xd7e0e0, { roughness: 0.4 }), 0.14, false);
+    [[57.4, 64.4], [58.9, 64.4], [60.4, 64.4], [57.4, 69.2], [58.9, 69.2], [60.4, 69.2]].forEach(function (c) { fb(c[0], c[1], 1.3, 0.08, 0, 2.0, 0xe6ecef); fb(c[0] + 0.4, c[1] + 0.2, 0.45, 0.6, 0, 0.4, 0xffffff); });
+    fb(55.4, 64.4, 1.4, 1.5, 0, 0.4, 0xffffff);
+    sign('WC', 55.9, 74.15, 3.0, 2.4, 0.9, '#2f6fa3', '#ffffff', true);
+    // the tenth shop (beauty salon) under the east link, glass front to the courtyard
+    B(83.4, 74.4, 6.4, 0.2, GH, mat.stone); B(83.4, 83.5, 6.4, 0.2, GH, mat.stone); B(83.4, 74.6, 0.1, 8.9, 4.2, mat.sg, 0.15, false);
+    [1, 2, 3, 4, 5].forEach(function (k) { B(83.36, 74.6 + k * 1.48, 0.08, 0.08, 4.2, mat.steelD, 0.15, false); });
+    B(83.0, 74.4, 0.6, 9.2, 0.18, mat.steelD, 4.3, false); B(82.2, 74.5, 1.6, 9.1, 0.2, mat.timber, 4.3); sign('Salon', 82.1, 79, 4.4, 5.0, 0.7, '#6d4529', '#f6ead8', true, -Math.PI / 2);
+    fb(89.35, 75, 0.4, 8, 0, 2.3, 0x6a5a48); fb(85.2, 76.5, 2.4, 0.6, 0, 1.05, 0x3a2a20); fb(85.2, 80.6, 2.4, 0.6, 0, 1.05, 0x3a2a20); B(85.6, 75.2, 0.2, 8, 0.08, mat.panel, 4.8, false);
+    // fuel station extras: vents, fill point, public WC sign, air and water bay; warehouse services, weighbridge, pedestrian doors
+    [14, 24, 34].forEach(function (vx) { B(vx - 0.1, 65.9, 0.2, 0.2, 4.6, mat.steelD); });
+    sign('Descarga', 7, 65.8, 1.2, 3.0, 0.6, '#c0432e', '#ffffff', true);
+    sign('WC', 14.5, 62.3, 3.0, 1.2, 0.6, '#2f6fa3', '#ffffff', true);
+    B(36.2, 76, 3.4, 12, 0.1, mat.conc, 0.1, false); [78, 82, 86].forEach(function (ay) { B(37.8, ay, 0.2, 0.2, 2.2, mat.steelD); B(37.7, ay, 0.4, 0.4, 0.5, mat.blue, 1.0); }); sign('Ar · Água', 38.0, 75.8, 2.6, 2.6, 0.5, '#2f6fa3', '#ffffff', true);
+    for (var wp = 0; wp < 10; wp++) { B(2 + wp * 9 + 7.0, 13.85, 0.9, 0.25, 2.2, mat.dark, 0, false); B(2 + wp * 9 + 0.32, 0.3, 3.0, 4.3, 0.15, mat.pave, 0, false); }
+    B(93, 2, 3, 3, 2.8, mat.conc); B(96, 2, 3, 3, 2.6, mat.conc); sign('PT', 94.5, 5.1, 2.0, 1.2, 0.6, '#c0432e', '#ffffff', true); sign('Gerador', 97.5, 5.1, 1.8, 2.2, 0.6, '#4c555d', '#ffffff', true);
+    var wt = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 4, 24), M(0xb9c0c6, { metalness: 0.3, roughness: 0.5 })); wt.position.copy(P(96, 8.5, 2)); wt.castShadow = true; root.add(wt); B(93.2, 6.2, 5.6, 0.2, 0.4, mat.steelD, 4.0);
+    B(96.5, 60, 3, 16, 0.12, mat.conc, 0.13, false); sign('Báscula', 98, 59.8, 0.8, 3.0, 0.6, '#4c555d', '#ffffff', true);
+    // Escada 2, from the west gallery down into the courtyard
+    (function () { var RS2 = 5.9 / 36; function fb2(x, w, py0, dir, n, top0) { for (var k = 0; k < n; k++) { var pa = py0 + dir * k * 0.25, lo = dir > 0 ? pa : pa - 0.25; B(x, lo, w, 0.23, top0 - k * RS2, mat.conc, 0, false); B(x - 0.04, lo, w + 0.08, 0.04, 0.05, mat.timber, top0 - k * RS2, false); } }
+      fb2(50.3, 1.2, 77.3, 1, 17, 5.9 - RS2); B(50.3, 81.55, 2.6, 1.2, 2.95, mat.conc); fb2(51.7, 1.2, 81.55, -1, 17, 2.95 - RS2); B(50.0, 76.0, 1.6, 1.3, 0.5, mat.stone, 5.2);
+      [50.3, 51.5].forEach(function (rx) { bar(P(rx, 77.3, 6.9), P(rx, 81.55, 3.95), 0.03, mat.steelD); }); [51.7, 52.9].forEach(function (rx) { bar(P(rx, 81.55, 3.95), P(rx, 77.3, 1.0), 0.03, mat.steelD); }); })();
+    // waste yard, drivers' facilities, accessible bays (parking is uncovered)
+    B(46.2, 53.5, 4.3, 0.1, 2.2, mat.steelD); B(46.2, 57.4, 4.3, 0.1, 2.2, mat.steelD); B(46.2, 53.5, 0.1, 4.0, 2.2, mat.steelD); B(50.4, 53.5, 0.1, 4.0, 2.2, mat.steelD); B(47, 54.5, 1.6, 1.0, 1.1, mat.green, 0.1);
+    B(93, 16, 6, 6, 3.2, mat.white); B(92.8, 15.8, 6.4, 6.4, 0.2, mat.steelD, 3.2); sign('Motoristas', 96, 22.1, 2.2, 3.6, 0.6, '#4c555d', '#ffffff', true);
+    B(60.5, 58, 11, 4.5, 0.02, mat.blue, 0.14, false);
+    B(5, 62.2, 4, 10.8, 0.3, mat.conc, 0.1);
+    flushFB();
+  }
+
+  var ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), downAt = null, hl = null;
+  var card = document.getElementById('card');
+  function showPick(m) {
+    if (hl) { scene.remove(hl); hl = null; }
+    if (!m) { card.hidden = true; return; }
+    hl = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0xffd35a }));
+    hl.position.copy(m.position); scene.add(hl);
+    document.getElementById('ct').textContent = m.userData.t; document.getElementById('cd').textContent = m.userData.d; card.hidden = false;
+  }
+  stage.addEventListener('pointerdown', function (e) { downAt = { x: e.clientX, y: e.clientY }; });
+  stage.addEventListener('pointerup', function (e) {
+    if (!downAt) return; var mv = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y); downAt = null; if (mv > 5) return;
+    var r = stage.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    var list = pickables.filter(function (m) { return m.userData.group === 'room' ? open : (m.userData.group === 'shell' ? !open : true); });
+    var h = ray.intersectObjects(list, false); showPick(h.length ? h[0].object : null);
+  });
+  function setInst(v) {
+    open = v; instRooms.visible = v; roofParts.forEach(function (p) { p.visible = !v; });
+    document.querySelectorAll('#inst button').forEach(function (b) { b.setAttribute('aria-pressed', (b.dataset.i === '1') === v ? 'true' : 'false'); });
+    showPick(null); if (v) go('inst'); else if (cur.r < 120) go('mall');
+  }
+
+  /* ---------- build ---------- */
+  function build() {
+    var gr = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), mat.grass); gr.rotation.x = -Math.PI / 2; gr.position.y = -0.1; gr.receiveShadow = true; root.add(gr);
+    B(-6, -8, 112, 108, 0.1, mat.pave, 0, false);                 // plot
+    // local street in front of the plot (narrow, light surface), then a wide planted buffer, then the N4 dual carriageway
+    B(-60, 100, 220, 7, 0.12, mat.paveD, 0, false);
+    B(-60, 100, 220, 0.25, 0.3, mat.conc, 0, false);              // kerb / fence line
+    B(-60, 107, 220, 25, 0.06, mat.green, 0, false);              // planted buffer between street and N4
+    B(-60, 110.5, 220, 1.6, 0.04, mat.paveD, 0, false);           // drainage ditch
+    B(-60, 132, 220, 8.8, 0.12, mat.asph, 0, false);              // N4 near carriageway (2 lanes + shoulder)
+    B(-60, 140.8, 220, 1.6, 0.5, mat.conc, 0, false);             // median barrier
+    B(-60, 142.4, 220, 8.8, 0.12, mat.asph, 0, false);            // N4 far carriageway
+    [135.65].forEach(function (ly) { for (var k = -58; k < 160; k += 6) B(k, ly, 3, 0.15, 0.02, mat.line, 0.13, false); });
+    [145.9 + 0.0].forEach(function (ly) { for (var k = -58; k < 160; k += 6) B(k, ly + 0.0, 3, 0.15, 0.02, mat.line, 0.13, false); });
+    B(-60, 132.2, 220, 0.12, 0.02, mat.line, 0.13, false); B(-60, 140.5, 220, 0.12, 0.02, mat.line, 0.13, false);
+    B(-60, 142.6, 220, 0.12, 0.02, mat.line, 0.13, false); B(-60, 151, 220, 0.12, 0.02, mat.line, 0.13, false);
+    for (var mp = -50; mp < 160; mp += 30) lampPost(mp, 141.2, 11);
+    var rootSave = root; root = new THREE.Group(); rootSave.add(root); window.__bufTrees = root;
+    for (var bt = -52; bt < 150; bt += 12) { tree(bt + rnd() * 5, 116 + rnd() * 12, 0.5 + rnd() * 0.5); }
+    root = rootSave;
+    for (var bh = -58; bh < 160; bh += 2.2) if (rnd() < 0.7) B(bh, 108 + rnd() * 5, 1.4, 1.2, 0.5 + rnd() * 0.4, mat.green, 0.05, false);
+
+    // plot surfaces
+    B(2, 14, 98, 30, 0.13, mat.asph, 0, false);                   // truck apron
+    B(92, 44, 8, 58, 0.13, mat.asph, 0, false);                   // truck lane + entrance
+    B(90, 46, 2, 56, 0.15, mat.green, 0, false);                  // planted separator
+    B(46, 46, 44, 18, 0.13, mat.asph, 0, false);                  // parking
+    B(44, 44, 46, 2, 0.15, mat.green, 0, false);
+    B(40, 46, 8, 56, 0.13, mat.asph, 0, false);                   // driveway
+    B(4, 50, 36, 52, 0.13, mat.asph, 0, false);                   // fuel station
+    B(4, 62, 36, 8, 0.14, mat.asph, 0, false);
+    B(48, 64, 42, 32, 0.14, mat.paveD, 0, false);                 // mall ground
+    B(48, 96, 42, 4, 0.14, mat.stone, 0, false);                  // pavement in front of shops
+    for (var k2 = 0; k2 <= 16; k2++) { B(48.1 + k2 * 2.6, 47, 0.1, 5, 0.02, mat.line, 0.14, false); B(48.1 + k2 * 2.6, 58, 0.1, 5, 0.02, mat.line, 0.14, false); }
+    for (var dl = 46; dl < 100; dl += 6) B(43.9, dl, 0.15, 3, 0.02, mat.line, 0.14, false);
+    for (var tl = 46; dl && tl < 98; tl += 6) B(95.9, tl, 0.15, 3, 0.02, mat.line, 0.14, false);
+
+    // warehouses 10 x (9 x 14): barrel-vault roofs, mural fascia, coloured dock doors
+    var doorCols = [0xc8572c, 0xe0a030, 0x1f6f78, 0x4a4f55, 0xa8683a];
+    for (var w = 0; w < 10; w++) {
+      var x0 = 2 + w * 9, dc = M(doorCols[w % 5], { roughness: 0.6 });
+      var hh = 7.5 + (w % 2) * 1.6;
+      B(x0 + 0.1, 0, 8.8, 14, hh, mat.wh);
+      B(x0 + 2.2, 1, 4.6, 12, 1.1, mat.wh, hh); B(x0 + 2.1, 1, 0.1, 12, 0.6, mat.glow, hh + 0.3, false); B(x0 + 6.8, 1, 0.1, 12, 0.6, mat.glow, hh + 0.3, false);
+      B(x0 + 0.1, -0.1, 8.8, 0.3, 0.3, mat.steelD, hh, false); B(x0 + 0.1, 13.8, 8.8, 0.3, 0.3, mat.steelD, hh, false);
+      B(x0 + 1.7, 13.85, 5.6, 0.25, 4.2, dc, 0, false);
+      B(x0 + 1.5, 14, 6, 1.8, 0.2, mat.steel, 4.4);
+      B(x0 + 1.7, 14, 0.3, 0.6, 1.4, mat.yellow, 0, false); B(x0 + 7, 14, 0.3, 0.6, 1.4, mat.yellow, 0, false);
+      [13.75, 9.2, 4.6, 0].forEach(function (fy) { B(x0 - 0.05, fy, 0.25, 0.25, hh + 0.1, mat.corten); B(x0 + 8.8, fy, 0.25, 0.25, hh + 0.1, mat.corten); B(x0 - 0.05, fy, 9.1, 0.25, 0.3, mat.corten, hh - 0.15); });
+      bar(P(x0 + 0.4, 14.2, 4.7), P(x0 + 8.6, 14.2, hh - 0.3), 0.06, mat.steelD); bar(P(x0 + 8.6, 14.2, 4.7), P(x0 + 0.4, 14.2, hh - 0.3), 0.06, mat.steelD);
+      bar(P(x0 + 1.5, 15.8, 4.6), P(x0 + 1.5, 14.1, hh - 0.3), 0.05, mat.steelD); bar(P(x0 + 7.5, 15.8, 4.6), P(x0 + 7.5, 14.1, hh - 0.3), 0.05, mat.steelD);
+      sign(String(w + 1), x0 + 1.0, 14.0, 4.9, 0.9, 0.5, '#2b2220', '#ffffff', false).position.y = 4.9;
+      pick(x0, 0, 9, 14, hh + 1.2, 0, 'Warehouse ' + (w + 1), '9 × 14 m, about 126 m². Dock door onto the 30 m truck apron, exposed steel portal frames, stepped roofline and a clerestory roof-light.');
+    }
+    B(0, 16, 1.2, 0.6, 3, mat.steel, 0, false);
+    // trucks: docked, reversing, rigid, queue on lane, one moving
+    put(semi(0x2d4a6b), 15.5, 29.2, 0); put(semi(0x7a2b2b), 33.5, 29.6, 0.38);
+    
+    put(semi(0xc9ced2, true), 36, 78 - 8, 0).visible = false;
+    for (var lt = 0; lt < 3; lt++) { var rig = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.9, 7), M(0x4f7a40 + lt * 0x1a1000)); rig.position.copy(P(60 + lt * 11, 38, 1.6)); rig.castShadow = true; root.add(rig); }
+
+    /* ---- MALL ---- */
+    var xs = [48, 54.8, 69.6, 76.4, 83.2], sw = 6.8, GH = 5.2, UE = 5.9, UH = 4.2, TOP = UE + UH;
+    var names = ['Pharmacy', 'Mini-market', 'Café', 'Phones', 'Hardware', 'Clothing', 'Salon', 'Print', 'Bank / ATM', 'Restaurant'];
+    [48, 54.8, 61.6, 69.6, 76.4, 83.2, 90].forEach(function (wx) { B(wx - 0.15, 84, 0.3, 12, GH, mat.stone); B(wx - 0.15, 64, 0.3, 10, GH, mat.stone); });
+    B(89.85, 74, 0.3, 10, GH, mat.stone);
+    B(90.15, 64, 0.1, 33, GH, mat.dtimber, 0, false);
+    for (var dy = 64; dy < 97; dy += 2.75) { bar(P(90.35, dy, 0.1), P(90.35, dy + 2.75, GH - 0.1), 0.05, mat.steelD); bar(P(90.35, dy + 2.75, 0.1), P(90.35, dy, GH - 0.1), 0.05, mat.steelD); }
+    function shopFront(x, y) {
+      B(x + 0.3, y, sw - 0.6, 0.12, 4.2, mat.sg, 0.15, false);
+      for (var mu = 1; mu < 4; mu++) B(x + 0.3 + (sw - 0.6) * mu / 4 - 0.04, y - 0.1, 0.08, 0.1, 4.2, mat.steelD, 0.15, false);
+      B(x + 0.3, y - 0.1, sw - 0.6, 0.1, 0.1, mat.steelD, 2.5, false);
+      B(x + 0.2, y - 0.12, sw - 0.4, 0.15, 0.18, mat.steelD, 4.3, false);
+      B(x + 0.2, y - 0.12, 0.12, 0.15, 4.3, mat.steelD, 0.1, false); B(x + sw - 0.32, y - 0.12, 0.12, 0.15, 4.3, mat.steelD, 0.1, false);
+    }
+    for (var s = 0; s < 5; s++) {
+      var x = xs[s], rec = (s % 2) ? 1.3 : 0, ce = 4.3 + 0.4 * (s % 2);
+      shopFront(x, 95.4 - rec); shopFront(x, 83.8); if (s !== 1) { shopFront(x, 73.9); shopFront(x, 64.1); }
+      B(x, 94.4, sw, 2.2, 0.2, mat.timber, ce); B(x - 0.02, 96.45, sw + 0.04, 0.2, 0.9, mat.dtimber, ce - 0.35, false);
+      bar(P(x + 0.5, 96.5, ce + 0.15), P(x + 0.5, 94.4, ce + 1.6), 0.04, mat.steelD); bar(P(x + sw - 0.5, 96.5, ce + 0.15), P(x + sw - 0.5, 94.4, ce + 1.6), 0.04, mat.steelD);
+      B(x, 62.0, sw, 2.2, 0.2, mat.timber, 4.3); B(x - 0.02, 61.85, sw + 0.04, 0.2, 0.9, mat.dtimber, 3.95, false);
+      bar(P(x + 0.5, 61.9, 4.45), P(x + 0.5, 64.2, 5.8), 0.04, mat.steelD); bar(P(x + sw - 0.5, 61.9, 4.45), P(x + sw - 0.5, 64.2, 5.8), 0.04, mat.steelD);
+      sign(names[s], x + sw / 2, 96.66, ce + 0.1, 5.4, 0.7, '#6d4529', '#f6ead8', true);
+      sign(s === 1 ? 'Public WC' : names[s + 5], x + sw / 2, 61.78, 4.4, 5.4, 0.7, s === 1 ? '#2f6fa3' : '#6d4529', s === 1 ? '#ffffff' : '#f6ead8', true, Math.PI);
+      pick(x, 84, sw, 12, GH, 0, names[s], 'About 70 m². Opens to the N4 pavement and to the courtyard.');
+      pick(x, 64, sw, 10, GH, 0, s === 1 ? 'Public toilets' : names[s + 5], s === 1 ? 'Women, men and accessible toilets for the shops and the institute, entrance from the courtyard beside the central gate, stacked under the first-floor toilets.' : 'About 65 m². Opens to the courtyard and to the rear arcade, so shoppers from the parking walk straight in.');
+    }
+    // floor slabs
+    B(48, 84, 13.6, 13.4, 0.7, mat.stone, GH); B(69.6, 84, 20.4, 13.4, 0.7, mat.stone, GH);
+    B(48, 63.6, 13.6, 10.4, 0.7, mat.stone, GH); B(69.6, 63.6, 20.4, 10.4, 0.7, mat.stone, GH); B(80, 74, 10, 10, 0.7, mat.stone, GH);
+    B(48, 74, 2, 10, 0.7, mat.stone, GH); B(61.6, 84, 8, 2, 0.5, mat.stone, GH + 0.2); B(61.6, 72, 8, 2, 0.5, mat.stone, GH + 0.2); B(81.7, 57.4, 2, 6.4, 0.5, mat.stone, GH + 0.2); B(78.7, 62.8, 3, 1, 0.5, mat.stone, GH + 0.2);
+    // square steel columns and a steel fascia beam carry the cantilevered institute
+    [48, 54.8, 76.4, 83.2, 90].forEach(function (cx) { B(cx - 0.15, 96.95, 0.3, 0.3, UE, mat.steelD); });
+    B(48, 97.2, 13.6, 0.25, 0.5, mat.steelD, UE - 0.1); B(69.6, 97.2, 20.4, 0.25, 0.5, mat.steelD, UE - 0.1);
+    for (var ob = 49; ob < 90; ob += 1.7) { if (ob > 60.5 && ob < 70) continue; B(ob, 96.0, 0.14, 1.3, 0.28, mat.steelD, UE - 0.28); }
+    // inner walls of the institute and glazing towards the courtyard
+    B(61.3, 63.8, 0.3, 8.2, UH, mat.dtimber, UE); B(69.5, 63.8, 0.3, 8.2, UH, mat.dtimber, UE);
+    B(61.3, 86, 0.3, 11, UH, mat.glass, UE, false); B(69.5, 86, 0.3, 11, UH, mat.glass, UE, false);
+    // balustrades on the courtyard side of the gallery ring and on the bridges
+    [[50, 84, 61.4, 84], [69.6, 84, 79.9, 84], [50, 74, 61.4, 74], [69.6, 74, 79.9, 74], [50, 74.1, 50, 83.9], [48, 74.1, 48, 83.9], [80, 74.1, 80, 83.9]].forEach(function (b) {
+      if (b[0] === b[2]) B(b[0] - 0.04, b[1], 0.08, b[3] - b[1], 1.1, mat.glass, UE, false); else B(b[0], b[1] - 0.04, b[2] - b[0], 0.08, 1.1, mat.glass, UE, false);
+      if (b[0] === b[2]) B(b[0] - 0.05, b[1], 0.1, b[3] - b[1], 0.06, mat.steelD, UE + 1.1, false); else B(b[0], b[1] - 0.05, b[2] - b[0], 0.1, 0.06, mat.steelD, UE + 1.1, false);
+    });
+    // one continuous timber-fin skin: straight slats, deep steel blades, stepped skyline, rectangular terrace openings with steel frames
+    var SC = [0x9a6540, 0x7d4f31, 0xb07a50];
+    function skinTop(v) { return TOP + 0.4 + (Math.floor(v / 6.8) % 2) * 0.8; }
+    function frameOpen(a, b, y) { var z0 = UE + 0.9, z1 = UE + 3.5; bar(P(a, y, z0), P(b, y, z0), 0.07, mat.steelD); bar(P(a, y, z1), P(b, y, z1), 0.07, mat.steelD); bar(P(a, y, z0), P(a, y, z1), 0.07, mat.steelD); bar(P(b, y, z0), P(b, y, z1), 0.07, mat.steelD); }
+    function skinX(xa, xb, y0, openings, north) {
+      for (var x = xa, i = 0; x < xb; x += 0.5, i++) {
+        var top = skinTop(x), blade = i % 6 === 0, d = blade ? 1.2 : 0.4, y = north ? y0 - (d - 0.4) : y0, c = blade ? 0x2f3438 : SC[i % 3], inOpen = false;
+        var isDoor = false; openings.forEach(function (p) { if (x >= p[0] && x <= p[1]) { inOpen = true; isDoor = p[2] === 'door'; } });
+        if (!inOpen) slat(x, y, blade ? 0.14 : 0.34, d, UE, top, c);
+        else if (isDoor) { slat(x, y0, 0.34, 0.4, UE + 2.4, top, c); }
+        else { slat(x, y0, 0.34, 0.4, UE, UE + 0.9, c); slat(x, y0, 0.34, 0.4, UE + 3.5, top, c); }
+      }
+      openings.forEach(function (p) { if (p[2] !== 'door') frameOpen(p[0], p[1], y0 + (north ? 0 : 0.4)); });
+    }
+    function skinYo(ya, yb, x0, ops) {
+      for (var y = ya, i = 0; y < yb; y += 0.5, i++) {
+        var blade = i % 6 === 0, inW = false; ops.forEach(function (p) { if (y >= p[0] && y <= p[1]) inW = true; });
+        var xx = blade ? x0 - 0.8 : x0, ww = blade ? 1.2 : 0.4, dd = blade ? 0.14 : 0.34, c = blade ? 0x2f3438 : SC[i % 3], tp = skinTop(y + 7);
+        if (!inW) slat(xx, y, ww, dd, UE, tp, c); else { slat(x0, y, 0.4, 0.34, UE, UE + 1.0, c); slat(x0, y, 0.4, 0.34, UE + 3.2, tp, c); }
+      }
+      ops.forEach(function (p) { var z0 = UE + 1.0, z1 = UE + 3.2, xf = x0 + 0.2; bar(P(xf, p[0], z0), P(xf, p[1], z0), 0.06, mat.steelD); bar(P(xf, p[0], z1), P(xf, p[1], z1), 0.06, mat.steelD); bar(P(xf, p[0], z0), P(xf, p[0], z1), 0.06, mat.steelD); bar(P(xf, p[1], z0), P(xf, p[1], z1), 0.06, mat.steelD); });
+    }
+    function skinY(ya, yb, x0) { for (var y = ya, i = 0; y < yb; y += 0.5, i++) { var blade = i % 6 === 0; slat(blade ? x0 - 0.8 : x0, y, blade ? 1.2 : 0.4, blade ? 0.14 : 0.34, UE, skinTop(y + 7), blade ? 0x2f3438 : SC[i % 3]); } }
+    skinX(48, 61.2, 96.5, [[50, 60]], false); skinX(70.0, 90, 96.5, [[71.4, 79], [83.6, 88.4]], false);
+    skinX(48, 61.2, 63.5, [[49.5, 53.5]], true); skinX(70.0, 90, 63.5, [[70.4, 75.6], [76.8, 79.2], [80, 83.2, 'door'], [84, 89]], true);
+    skinY(63.5, 74, 47.9); skinY(84, 97.2, 47.9); skinYo(63.5, 97.4, 89.6, [[65, 67], [69.5, 72.5], [75, 78], [80.5, 83.5], [86, 89]]);
+    flushSlats();
+    var bwm = M(0x6b4128);
+    function backWall(xa, xb, y, op) { var cur = xa; op.forEach(function (p) { if (p[0] > cur) B(cur, y, p[0] - cur, 0.15, UH, bwm, UE, false); if (p[2] === 'door') B(p[0], y, p[1] - p[0], 0.15, TOP - UE - 2.4, bwm, UE + 2.4, false); else { B(p[0], y, p[1] - p[0], 0.15, 0.9, bwm, UE, false); B(p[0], y, p[1] - p[0], 0.15, TOP - UE - 3.5, bwm, UE + 3.5, false); } cur = p[1]; }); if (xb > cur) B(cur, y, xb - cur, 0.15, UH, bwm, UE, false); }
+    backWall(48, 61.4, 96.15, [[50, 60]]); backWall(69.9, 89.9, 96.15, [[71.4, 79], [83.6, 88.4]]);
+    backWall(48, 61.4, 63.75, [[49.5, 53.5]]); backWall(69.9, 89.9, 63.75, [[70.4, 75.6], [76.8, 79.2], [80, 83.2, 'door'], [84, 89]]);
+    B(48.05, 63.8, 0.15, 10.2, UH, bwm, UE, false); B(48.05, 84, 0.15, 13, UH, bwm, UE, false); [[63.8, 65], [67, 69.5], [72.5, 75], [78, 80.5], [83.5, 86], [89, 97.2]].forEach(function (g) { B(89.5, g[0], 0.15, g[1] - g[0], UH, bwm, UE, false); }); [[65, 67], [69.5, 72.5], [75, 78], [80.5, 83.5], [86, 89]].forEach(function (g) { B(89.5, g[0], 0.15, g[1] - g[0], 1.0, bwm, UE, false); B(89.5, g[0], 0.15, g[1] - g[0], UH - 3.2, bwm, UE + 3.2, false); });
+    // terraces behind the pills
+    [[71.4, 79]].forEach(function (r) {
+      B(r[0], 91.2, r[1] - r[0], 0.15, 3.8, mat.glass, UE + 0.1, false);
+      B(r[0] - 0.4, 95.7, r[1] - r[0] + 0.8, 0.7, 0.7, mat.conc, UE + 0.7); B(r[0] - 0.3, 95.8, r[1] - r[0] + 0.6, 0.5, 0.5, mat.green, UE + 1.4, false);
+      for (var sl = r[0] + 0.5; sl < r[1]; sl += 1.1) { var bl = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), mat.lamp); bl.position.copy(P(sl, 94 + Math.sin(sl * 2) * 0.3, UE + 3.2 + Math.sin((sl - r[0]) / (r[1] - r[0]) * Math.PI) * -0.4)); root.add(bl); }
+      var n = Math.max(2, Math.round((r[1] - r[0]) / 2.6));
+      for (var tb = 0; tb < n; tb++) {
+        var tx = r[0] + 1.2 + tb * ((r[1] - r[0] - 2.4) / Math.max(1, n - 1));
+        var t = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.08, 12), mat.white); t.position.copy(P(tx, 93.3, UE + 0.9)); root.add(t);
+        person(tx - 0.8, 93.3, UE + 0.7); person(tx + 0.8, 93.6, UE + 0.7);
+      }
+    });
+    [[50, 60], [83.6, 88.4]].forEach(function (r) { B(r[0] - 0.3, 95.7, r[1] - r[0] + 0.6, 0.6, 0.7, mat.conc, UE + 0.7); B(r[0] - 0.2, 95.8, r[1] - r[0] + 0.4, 0.4, 0.5, mat.green, UE + 1.4, false); });
+    // roofs (hidden when the interior is opened)
+    [[47.6, 83.6, 14.4, 14.2], [69.2, 83.6, 21, 14.2], [47.6, 63.4, 14.4, 10.8], [69.2, 63.4, 21, 10.8], [79.6, 73.6, 10.4, 10.6], [47.6, 73.6, 2.8, 10.8], [61.2, 83.6, 8.7, 2.8], [61.2, 71.6, 8.7, 2.8]].forEach(function (r) {
+      roofParts.push(B(r[0], r[1], r[2], r[3], 0.55, mat.timber, TOP)); roofParts.push(B(r[0] + 0.5, r[1] + 0.5, r[2] - 1, r[3] - 1, 0.05, mat.panel, TOP - 0.05, false));
+    });
+    pvRows(70.5, 89, 85.2, 96.2, TOP + 0.55); pvRows(70.5, 89, 64.6, 73.2, TOP + 0.55); pvRows(49, 60.6, 85.2, 96.2, TOP + 0.55); pvRows(49, 60.6, 64.6, 73.2, TOP + 0.55);
+    // arched gate portals, glass bridges
+    gateFrames(85, 96.6); gateFrames(63.6, 74.2);
+    // tall steel gantry over the gate carries the name
+    B(61.2, 96.7, 0.4, 0.4, 14, mat.corten); B(69.4, 96.7, 0.4, 0.4, 14, mat.corten); B(61.2, 96.7, 8.6, 0.4, 0.4, mat.corten, 13.6); B(61.2, 96.7, 8.6, 0.4, 0.3, mat.corten, 10.3);
+    bar(P(61.6, 97.1, 10.5), P(69.4, 97.1, 13.6), 0.05, mat.steelD); bar(P(69.4, 97.1, 10.5), P(61.6, 97.1, 13.6), 0.05, mat.steelD);
+    sign('NTT Mall', 65.6, 96.55, 11.9, 6.6, 1.2, '#3f2a1a', '#f6ead8', true);
+    B(61.2, 63.6, 0.4, 0.4, 12, mat.corten); B(69.4, 63.6, 0.4, 0.4, 12, mat.corten); B(61.2, 63.6, 8.6, 0.4, 0.4, mat.corten, 11.6);
+    B(61.6, 84, 8, 2, 3.3, mat.glass, UE, false); B(61.2, 83.6, 8.8, 2.8, 0.4, mat.timber, UE + 3.3);
+    B(61.6, 72, 8, 2, 3.3, mat.glass, UE, false); B(61.2, 71.6, 8.8, 2.8, 0.4, mat.timber, UE + 3.3);
+    for (var gl = 62; gl < 69.6; gl += 0.9) { var gb = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), mat.lamp); gb.position.copy(P(gl, 78, 8.6)); root.add(gb); var gb2 = gb.clone(); gb2.position.copy(P(gl, 92.5, 8.2)); root.add(gb2); }
+    pick(61.6, 64, 8, 32, GH + 5, 0, 'Central gate', 'Double-height arched gate from the N4 pavement through the courtyard to the rear parking. Glass bridges link the two halves of the institute above it.');
+    // courtyard: steel pergola grids with shade panels, water, steel cube sculpture
+    pergola(48.4, 55.2, 75, 83, 8.2); pergola(55.4, 61.2, 75, 83, 8.6); pergola(70, 79, 75, 83, 8.4);
+    B(48.6, 75.2, 1.4, 1.4, 0.6, mat.conc); tree(49.3, 75.9, 0.5); B(59.6, 81.4, 1.4, 1.4, 0.6, mat.conc); tree(60.3, 82.1, 0.5);
+    B(63.5, 76.8, 4.6, 4.6, 0.3, mat.conc); B(63.8, 77.1, 4.0, 4.0, 0.1, mat.water, 0.3, false);
+    sculpt = new THREE.Group(); var gold = M(0xd9a441, { metalness: 0.85, roughness: 0.25 });
+    [1.3, 0.85, 0.4].forEach(function (h, i) { var cf = cubeFrame(h, 0.06, gold); cf.rotation.y = i * 0.5; sculpt.add(cf); });
+    sculpt.position.copy(P(65.8, 79.1, 2.6)); sculpt.rotation.y = 0.2; root.add(sculpt);
+    B(80, 76, 3, 4, 3.2, mat.timber); B(80, 80.1, 3, 0.12, 2.2, mat.glow, 0.3, false); sign('Kiosk', 81.5, 80.3, 2.9, 2.6, 0.5, '#3f2a1a', '#f6ead8', true);
+    for (var cs = 0; cs < 6; cs++) { var tb2 = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.08, 10), mat.white); tb2.position.copy(P(51 + cs * 2.2, 82.4, 0.8)); root.add(tb2); }
+    for (var pq = 0; pq < 16; pq++) { var pw = person(50 + rnd() * 38, 74.8 + rnd() * 8.4, 0.14), px0 = 50 + rnd() * 38, py0 = 74.8 + rnd() * 8.4; walkers.push([pw, pq % 2 ? [[px0, py0], [px0, 74.8 + rnd() * 8.4]] : [[px0, py0], [50 + rnd() * 38, py0]]]); }
+    for (var sp3 = 0; sp3 < 10; sp3++) { var sx = 50 + rnd() * 40, sy = 97 + rnd() * 2.6; walkers.push([person(sx, sy, 0.14), [[sx, sy], [Math.min(92, Math.max(46, sx + (sp3 % 2 ? 22 : -22))), sy]]]); }
+    pick(48, 74, 42, 10, 3, 0, 'Courtyard', 'Open-air heart of the mall under a timber pergola: trees, water, a gold sculpture and a coffee kiosk.');
+    // institute tower at the rear: glass box in an exposed steel frame, with the main U-shaped stair and the lift shaft visible inside
+    B(78.7, 57.4, 5, 6, 13.5, mat.glass, 0, false);
+    [[78.6, 57.3], [83.4, 57.3], [78.6, 63.2], [83.4, 63.2]].forEach(function (c) { B(c[0], c[1], 0.3, 0.3, 13.6, mat.steelD); });
+    for (var fl = 0; fl <= 4; fl++) { var fe = fl * 3.375; B(78.6, 57.3, 5.1, 0.25, 0.25, mat.steelD, fe); B(78.6, 63.25, 5.1, 0.25, 0.25, mat.steelD, fe); B(78.6, 57.3, 0.25, 6.1, 0.25, mat.steelD, fe); B(83.45, 57.3, 0.25, 6.1, 0.25, mat.steelD, fe); }
+    for (var bf = 0; bf < 4; bf++) { var b0 = bf * 3.375, b1 = b0 + 3.375;
+      bar(P(78.7, 57.2, b0 + 0.1), P(83.7, 57.2, b1 - 0.1), 0.045, mat.corten); bar(P(83.7, 57.2, b0 + 0.1), P(78.7, 57.2, b1 - 0.1), 0.045, mat.corten);
+      bar(P(83.8, 57.4, b0 + 0.1), P(83.8, 63.4, b1 - 0.1), 0.045, mat.corten); bar(P(83.8, 63.4, b0 + 0.1), P(83.8, 57.4, b1 - 0.1), 0.045, mat.corten); }
+    B(77.8, 56.5, 6.8, 7.8, 0.35, mat.timber, 13.6);
+    var RS = 5.9 / 36;
+    function flightB(x, w, py0, dir, n, top0, drise) { for (var k = 0; k < n; k++) { var pa = py0 + dir * k * 0.25, lo = dir > 0 ? pa : pa - 0.25; B(x, lo, w, 0.23, top0 + drise * k * RS, mat.stone, 0, false); B(x - 0.04, lo, w + 0.08, 0.04, 0.05, mat.timber, top0 + drise * k * RS, false); } }
+    flightB(79.0, 1.2, 63.0, -1, 17, RS, 1); B(79.0, 57.55, 2.6, 1.2, 2.95, mat.stone); flightB(80.4, 1.2, 58.75, 1, 17, 2.95 + RS, 1);
+    [79.0, 80.2, 80.4, 81.6].forEach(function (rx) { bar(P(rx, 63.0, 1.0), P(rx, 58.75, 3.95), 0.03, mat.steelD); });
+    [80.4, 81.6].forEach(function (rx) { bar(P(rx, 58.75, 4.0), P(rx, 63.0, 6.9), 0.03, mat.steelD); });
+    B(82.0, 57.6, 1.6, 2.2, 13, mat.glass, 0, false); [[82.0, 57.6], [83.55, 57.6], [82.0, 59.75], [83.55, 59.75]].forEach(function (c) { B(c[0], c[1], 0.06, 0.06, 13, mat.steelD); });
+    B(82.2, 57.8, 1.2, 1.8, 2.2, mat.panel, 0.1, false); B(82.2, 57.8, 1.2, 1.8, 2.2, mat.panel, 6.0, false);
+    sign('Elevador', 82.8, 59.85, 2.6, 1.6, 0.5, '#2f6fa3', '#ffffff', true); sign('Escada', 79.8, 63.55, 2.6, 1.6, 0.5, '#2f6fa3', '#ffffff', true);
+    sign('Institute', 81.2, 56.4, 10.4, 5.4, 1.1, '#3f2a1a', '#f6ead8', true, Math.PI);
+    pick(78.7, 57.4, 5, 6, 13, 0, 'Institute entrance tower', 'Glass tower on the parking side: a U-shaped stair with 36 steps and a half landing, and an accessible lift. It opens straight onto the east foyer, so nobody walks through reception or the offices.');
+    // institute interior (visible when the roof is opened): rooms, labels, picking
+    var ROOMS = [
+      ['Classroom H', 48, 86, 6.8, 11, 0, 'About 36 students, door from the front gallery.'], ['Library', 54.8, 86, 6.8, 11, 0, 'Reading room with shelves and tables. Door from the front gallery.'],
+      ['Computer lab', 69.6, 86, 10.4, 5.6, 0, '20 workstations with backup power. Door from the front gallery.'], ['Esplanada café', 69.6, 91.6, 10.4, 5.4, 0, 'Student café with street-side opening, reached from the east foyer.'],
+      ['Classroom A', 83.2, 84, 6.8, 7.6, 0, 'About 24 students, door from the east foyer.'], ['Classroom B', 83.2, 91.6, 6.8, 5.4, 0, 'About 18 students, street window.'],
+      ['Classroom E', 83.2, 74, 6.8, 5, 0, 'About 18 students, door from the east foyer.'], ['Toilets (east)', 83.2, 79, 6.8, 5, 0, 'Women, men and an accessible toilet off the east foyer, for the classrooms on this side.'],
+      ['Classroom C', 48, 63.6, 6.8, 8.4, 0, 'About 30 students, door from the rear gallery.'], ['Classroom D', 69.6, 63.6, 6.8, 8.4, 0, 'About 30 students, door from the rear gallery.'],
+      ['Toilets (west)', 54.8, 63.6, 6.8, 8.4, 0, 'Women 4 WCs, men 2 WCs and 3 urinals, accessible toilet, cleaner closet. Off the rear gallery.'],
+      ['Reception', 76.4, 66.5, 3.6, 5.5, 0, 'A destination off the foyer, nobody has to pass through it.'], ['Management and secretariat', 83.2, 63.6, 6.8, 4.4, 0, 'Director and secretariat with their own WC and a door onto the foyer.'], ['Staff room', 83.2, 68, 6.8, 4, 0, 'Teachers room with lockers and desks, with two staff WCs next to it.'], ['Infirmary', 76.4, 63.6, 3.6, 2.9, 0, 'First-aid room next to the reception.']
+    ];
+    ROOMS.forEach(function (R) { pick(R[1], R[2], R[3], R[4], 2.6, UE, 'Institute · ' + R[0], R[6], 'room'); });
+    pick(48, 84, 13.6, 13, 4.2, UE, 'The Institute', 'One continuous timber skin wraps the whole first floor: classrooms, lab, library, auditorium, two terraces and a roof with solar panels. Press Open interior to see the rooms.', 'shell');
+    pick(69.6, 84, 20.4, 13, 4.2, UE, 'The Institute', 'One continuous timber skin wraps the whole first floor: classrooms, lab, library, auditorium, two terraces and a roof with solar panels. Press Open interior to see the rooms.', 'shell');
+    pick(48, 63.6, 13.6, 10.4, 4.2, UE, 'The Institute', 'One continuous timber skin wraps the whole first floor: classrooms, lab, library, auditorium, two terraces and a roof with solar panels. Press Open interior to see the rooms.', 'shell');
+    pick(69.6, 63.6, 20.4, 10.4, 4.2, UE, 'The Institute', 'One continuous timber skin wraps the whole first floor: classrooms, lab, library, auditorium, two terraces and a roof with solar panels. Press Open interior to see the rooms.', 'shell');
+    pick(80, 74, 10, 10, 4.2, UE, 'The Institute', 'The east link joins both bars and holds the auditorium. Press Open interior to see the rooms.', 'shell');
+
+    /* ---- FUEL STATION ---- */
+    var shops = [[4, 'Convenience', 0xe9e3d5, '#e0ac2c', '#23201c'], [16, 'Tyre shop', 0xb9c0c6, '#2f3a44', '#ffffff']];
+    shops.forEach(function (sh) {
+      B(sh[0], 50, 12, 12, 4.4, M(sh[2], { roughness: 0.7 })); B(sh[0] - 0.1, 49.9, 12.2, 12.2, 0.35, mat.yellow, 4.4);
+      B(sh[0] + 0.1, 62, 11.8, 2, 0.2, mat.white, 4.0);
+      sign(sh[1], sh[0] + 6, 64.15, 4.5, 7, 0.7, sh[3], sh[4], true);
+    });
+    // convenience store front
+    B(4.8, 61.9, 10.4, 0.12, 3.1, mat.glow, 0.2, false);
+    // tyre workshop: pedestrian door + three open roll-up bays (cars drive in from the forecourt, face north)
+    B(16.9, 61.9, 1.0, 0.12, 2.2, mat.glow, 0.2, false);
+    [18.4, 21.6, 24.8].forEach(function (bx, i) {
+      B(bx, 61.9, 3.0, 0.12, 3.0, mat.dark, 0.0, false);
+      B(bx - 0.1, 61.85, 3.2, 0.3, 0.35, mat.corten, 3.0, false);
+      B(bx + 0.3, 55.0, 2.4, 6.9, 0.04, M(0x8d8d90), 0.0, false);
+      B(bx - 0.15, 54.95, 0.14, 6.9, 0.14, mat.yellow, 0.0, false);
+      if (i < 2) { var cb = car(CARCOL[(i * 3 + 1) % CARCOL.length]); cb.position.copy(P(bx + 1.5, 58.6, 0.65)); cb.rotation.y = Math.PI; root.add(cb);
+        B(bx + 0.25, 58.0, 0.12, 1.0, 1.9, mat.yellow, 0, false); B(bx + 2.2, 58.0, 0.12, 1.0, 1.9, mat.yellow, 0, false); }
+    });
+    B(18.35, 54.95, 0.1, 7.0, 3.2, mat.steelD, 0, false); B(21.5, 54.95, 0.1, 7.0, 3.2, mat.steelD, 0, false); B(24.7, 54.95, 0.1, 7.0, 3.2, mat.steelD, 0, false);
+    for (var ty = 0; ty < 4; ty++) { var tr = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.2, 8, 14), M(0x111111)); tr.rotation.x = Math.PI / 2; tr.position.copy(P(16.9, 63.4, 0.22 + ty * 0.42)); tr.castShadow = true; root.add(tr); }
+    // drive-through car wash tunnel (x 28.1-32.45), plant + cashier (32.45-34.9), open entry south, open exit north
+    B(27.8, 50, 7.6, 12, 0.4, M(0xb9c0c6, { roughness: 0.6, metalness: 0.2 }), 4.0);
+    B(28.1, 50, 0.3, 12, 4.0, M(0xb9c0c6, { roughness: 0.6 }), 0); B(32.45, 50, 0.3, 12, 4.0, M(0xb9c0c6, { roughness: 0.6 }), 0);
+    B(32.75, 50, 2.2, 12, 4.0, M(0xe9e3d5, { roughness: 0.7 }), 0); B(27.7, 49.9, 7.8, 12.2, 0.35, mat.blue, 4.4);
+    B(28.4, 50, 4.05, 12, 0.04, M(0x55595d), 0.0, false);
+    B(32.9, 61.9, 1.6, 0.12, 2.2, mat.glow, 0.2, false);
+    // tunnel equipment: gantry, blue top brush, side brushes, dryer, bay light strips
+    B(28.5, 55.0, 0.2, 0.3, 3.4, mat.steelD, 0); B(32.1, 55.0, 0.2, 0.3, 3.4, mat.steelD, 0); B(28.5, 55.0, 3.8, 0.3, 0.25, mat.blue, 3.2);
+    B(29.3, 54.6, 2.2, 0.6, 0.6, M(0x2f6fa3, { roughness: 0.9 }), 2.3, false);
+    B(28.7, 57.5, 0.45, 0.45, 2.4, M(0xd8d6d0, { roughness: 0.9 }), 0.2, false); B(31.8, 57.5, 0.45, 0.45, 2.4, M(0xd8d6d0, { roughness: 0.9 }), 0.2, false);
+    B(28.5, 52.0, 3.8, 0.4, 0.3, mat.steelD, 3.2); B(28.4, 50.0, 0.1, 12, 0.05, mat.lamp, 3.9, false); B(32.25, 50.0, 0.1, 12, 0.05, mat.lamp, 3.9, false);
+    var cw = car(0x2d4a6b); cw.position.copy(P(30.3, 53.5, 0.65)); cw.rotation.y = Math.PI; root.add(cw);
+    sign('Car wash', 31.6, 64.15, 4.5, 7, 0.7, '#2f6fa3', '#ffffff', true);
+    // pre-wash entry canopy, pay kiosk, queue, exit lane, rear lane, rear fence
+    B(27.8, 62.1, 7.6, 4.4, 0.25, mat.steelD, 3.9); [[27.9, 62.2], [34.9, 62.2], [27.9, 66.0], [34.9, 66.0]].forEach(function (c) { B(c[0], c[1], 0.3, 0.3, 3.9, mat.steelD); });
+    B(33.4, 66.7, 1.2, 1.6, 1.8, M(0xe9e3d5), 0); B(33.4, 66.7, 1.2, 0.08, 0.6, mat.glow, 1.0, false);
+    B(35, 50, 5, 12, 0.03, M(0x4a4b4e, { roughness: 0.95 }), 0.0, false); B(28, 45.6, 12, 4.3, 0.03, M(0x4a4b4e, { roughness: 0.95 }), 0.0, false);
+    B(4, 45.2, 36.4, 0.08, 2.0, mat.steelD, 0, false);
+    for (var ar = 0; ar < 3; ar++) { B(36.2 + ar * 1.4, 49.0, 0.9, 0.12, 0.02, mat.line, 0.04, false); }
+    // canopy
+    [[13, 73], [34.4, 73], [13, 86.4], [34.4, 86.4], [23.7, 73], [23.7, 86.4]].forEach(function (c) { B(c[0], c[1], 0.5, 0.5, 5.6, mat.steelD); });
+    for (var rf = 11.6; rf < 36.5; rf += 2.4) B(rf, 71.5, 0.22, 17, 0.45, mat.steelD, 6.1);
+    B(11.5, 71.5, 25, 17, 0.5, mat.white, 5.6);
+    B(11.5, 71.5, 25, 0.3, 1, mat.yellow, 5.9); B(11.5, 88.2, 25, 0.3, 1, mat.yellow, 5.9); B(11.5, 71.5, 0.3, 17, 1, mat.yellow, 5.9); B(36.2, 71.5, 0.3, 17, 1, mat.yellow, 5.9);
+    B(12, 72, 24, 16, 0.05, mat.lamp, 5.55, false);
+    [75.2, 80.2, 85.2].forEach(function (py) {
+      B(15, py, 18, 1.2, 0.25, mat.conc, 0.13);
+      for (var pp = 0; pp < 2; pp++) { B(16 + pp * 15, py + 0.3, 0.7, 0.6, 1.5, mat.white, 0.38); B(16 + pp * 15, py + 0.2, 0.7, 0.15, 0.4, mat.yellow, 1.5, false); }
+    });
+    sign('Fuel', 23.5, 88.6, 6.1, 7, 1.3, '#e0ac2c', '#23201c', true);
+    [[-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7]].forEach(function (c) { bar(P(9.95 + c[0], 93.6 + c[1], 0), P(9.95 + c[0] * 0.3, 93.6 + c[1] * 0.3, 9), 0.06, mat.steelD); });
+    [2, 4.5, 7].forEach(function (hz) { var k = 1 - hz / 12; var rr = new THREE.Mesh(new THREE.TorusGeometry(0.7 * k * 1.2, 0.04, 5, 4), mat.steelD); rr.rotation.x = Math.PI / 2; rr.rotation.z = Math.PI / 4; rr.position.copy(P(9.95, 93.6, hz)); root.add(rr); }); sign('Fuel · Tyres · Wash', 9.95, 94.0, 8.7, 5.4, 2.6, '#e0ac2c', '#23201c', true);
+    // station vehicles
+    park(20, 78.2, Math.PI / 2); park(28, 83.2, Math.PI / 2); park(22, 73.5, Math.PI / 2);
+    put(semi(0xc9ced2, true), 37.2, 71 + 0.2, Math.PI).scale.set(0.8, 0.8, 0.8);
+    park(10, 66.5, 0); park(12.4, 66.5, 0);
+    // front planting at the station
+    [14, 17, 32, 36].forEach(function (tx) { tree(tx, 95.4, 0.75); });
+    for (var hx = 14; hx < 36; hx += 1.5) { if (hx > 18 && hx < 29) continue; B(hx, 97, 1.1, 0.8, 0.5, mat.green, 0.15, false); }
+
+    pick(4, 50, 12, 12, 4.4, 0, 'Convenience store', 'Snacks, drinks and basics, parked cars right outside, open late.');
+    pick(16, 50, 12, 12, 4.4, 0, 'Tyre shop', 'Tyre fitting and repair with a service lane in front.');
+    pick(28, 50, 12, 12, 4.4, 0, 'Car wash', 'Two wash bays with a queue lane that does not block the pumps.');
+    pick(11.5, 71.5, 25, 17, 6.6, 0, 'Fuel canopy', '3 islands, 6 pumps. Tanks sit under the canopy; tankers unload at the fill point on the east side via the shared driveway.');
+    pick(46, 46, 44, 18, 2, 0, 'Customer parking', '32 bays behind the mall, facing the rear arcade. Reached by the shared driveway, so shoppers enter from the back.');
+    pick(2, 14, 98, 30, 1, 0, 'Truck apron', '30 m deep. A 16.5 m semi swings on a 12.5 m radius and reverses straight into any dock. Separate truck lane, no mixing with customers.');
+    // lamps and planting
+    [14, 38, 56, 82].forEach(function (lx) { lampPost(lx, 99.2, 8); });
+    [60, 68, 76].forEach(function (lx) { lampPost(lx, 46.5, 7); });
+    lampPost(50, 24, 12); lampPost(86, 24, 12); lampPost(20, 24, 12);
+    for (var ty2 = 4; ty2 < 100; ty2 += 11) { tree(-3, ty2, 1 + rnd() * 0.3); }
+    for (var tz = 6; tz < 100; tz += 9) tree(91, tz > 46 ? tz : 200, 0.8);
+    for (var bx = 6; bx < 100; bx += 11) tree(bx, -3, 1 + rnd() * 0.4);
+    [[41.5, 70], [41.5, 90], [46.5, 55], [46.5, 85]].forEach(function (c) { tree(c[0], c[1], 0.45); });
+    for (var te = 50; te < 90; te += 8) tree(te, 45, 0.6);
+    for (var sx2 = 0; sx2 < 100; sx2 += 12) if (sx2 < 36 || sx2 > 76) tree(sx2 + 1, 98.4, 0.4);
+
+    // parked cars
+    [47, 58].forEach(function (yy, ri) { for (var k = 0; k < 16; k++) { var pcx = 48.2 + 1.3 + k * 2.6; if (rnd() < 0.55 && !(pcx > 77 && pcx < 85 && yy > 56)) park(pcx, yy + 2.5, ri ? Math.PI : 0); } });
+    buildInterior();
+    // bus shelter
+    B(52, 97.4, 7, 1.4, 0.15, mat.timber, 2.8); B(52.2, 98.6, 0.15, 0.15, 2.8, mat.steel); B(58.6, 98.6, 0.15, 0.15, 2.8, mat.steel);
+  }
+
+  /* ---------- traffic on the N4 ---------- */
+  var traffic = [];
+  function addTraffic() {
+    var lanes = [[134.0, 1], [137.5, 1], [144.2, -1], [147.7, -1]];
+    lanes.forEach(function (ln, li) {
+      for (var k = 0; k < 4; k++) {
+        var big = ((li + k) % 3 === 0), g = big ? semi([0x2d4a6b, 0x7a2b2b, 0xd4891c, 0x3a3a3a][k % 4], k === 1) : car(CARCOL[(li + k) % CARCOL.length]);
+        g.rotation.y = ln[1] > 0 ? Math.PI / 2 : -Math.PI / 2;
+        g.position.set(-110 + k * 55 + li * 13, 0.1, ln[0] - 50); root.add(g);
+        traffic.push({ g: g, v: ln[1] * (big ? 7 : 11) * (0.85 + (li % 3) * 0.12) });
+      }
+    });
+    // service-road cars
+    for (var sr = 0; sr < 3; sr++) { var c = car(CARCOL[sr + 2]); c.rotation.y = sr % 2 ? -Math.PI / 2 : Math.PI / 2; c.position.set(-60 + sr * 60, 0.1, (sr % 2 ? 105.2 : 102) - 50); root.add(c); traffic.push({ g: c, v: (sr % 2 ? -1 : 1) * 3.5 }); }
+  }
+
+  /* ---------- camera ---------- */
+  var VIEWS = {
+    street:  { p: [-34, 19, 96], t: [-2, 3, 34] },
+    gate:    { p: [15.6, 2.4, 56], t: [15.6, 4.2, 20] },
+    mall:    { p: [40, 10, 62], t: [20, 6, 38] },
+    rear:    { p: [40, 9, -8], t: [19, 6, 26] },
+    station: { p: [-60, 20, 52], t: [-30, 2, 8] },
+    yard:    { p: [34, 24, 6], t: [-14, 2, -26] },
+    inst:    { p: [20, 64, 84], t: [19, 5, 32] },
+    aerial:  { p: [-80, 105, 150], t: [0, 0, 20] }
+  };
+  var cur = { tx: 0, ty: 0, tz: 0, th: 0, ph: 1, r: 80 }, goal = {};
+  function toSph(v) {
+    var d = new THREE.Vector3(v.p[0] - v.t[0], v.p[1] - v.t[1], v.p[2] - v.t[2]);
+    return { tx: v.t[0], ty: v.t[1], tz: v.t[2], r: d.length(), th: Math.atan2(d.x, d.z), ph: Math.acos(d.y / d.length()) };
+  }
+  function go(k, snap) {
+    goal = toSph(VIEWS[k]); if (snap) Object.assign(cur, goal);
+    document.querySelectorAll('#views button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.v === k ? 'true' : 'false'); });
+  }
+  function clampG() { goal.ph = Math.max(0.2, Math.min(1.52, goal.ph)); goal.r = Math.max(6, Math.min(320, goal.r)); }
+  var ptrs = {}, lastPinch = 0;
+  stage.addEventListener('pointerdown', function (e) { stage.setPointerCapture(e.pointerId); ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; });
+  stage.addEventListener('pointerup', function (e) { delete ptrs[e.pointerId]; lastPinch = 0; });
+  stage.addEventListener('pointercancel', function (e) { delete ptrs[e.pointerId]; lastPinch = 0; });
+  stage.addEventListener('pointermove', function (e) {
+    var p = ptrs[e.pointerId]; if (!p) return;
+    var ids = Object.keys(ptrs);
+    if (ids.length === 1) { goal.th -= (e.clientX - p.x) * 0.006; goal.ph -= (e.clientY - p.y) * 0.006; }
+    p.x = e.clientX; p.y = e.clientY;
+    if (ids.length === 2) {
+      var a = ptrs[ids[0]], b = ptrs[ids[1]], d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (lastPinch) goal.r *= lastPinch / d; lastPinch = d;
+    }
+    clampG();
+  });
+  stage.addEventListener('wheel', function (e) { e.preventDefault(); goal.r *= 1 + e.deltaY * 0.0012; clampG(); }, { passive: false });
+  document.getElementById('views').addEventListener('click', function (e) { if (e.target.dataset.v) go(e.target.dataset.v); });
+  document.getElementById('inst').addEventListener('click', function (e) { if (e.target.dataset.i) setInst(e.target.dataset.i === '1'); });
+  document.getElementById('modes').addEventListener('click', function (e) { if (e.target.dataset.m) setMode(e.target.dataset.m); });
+
+  function resize() { if (frozen) return; var w = stage.clientWidth, h = stage.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  new ResizeObserver(resize).observe(stage); resize();
+
+
+  /* ---------- animation: people walk, cars cycle through the fuel station, trucks run the warehouse apron ---------- */
+  function mover(g, pts, spd, mode, delay, walk) {
+    root.add(g); movers.push({ g: g, pts: pts, spd: spd, mode: mode, i: 0, dir: 1, wait: delay || 0, walk: walk, y0: g.position.y, ph: Math.random() * 6, cx: pts[0][0], cy: pts[0][1], rot: 0 });
+    g.position.set(pts[0][0] - 50, g.position.y, pts[0][1] - 50); if (mode === 'loop') g.visible = false;
+  }
+  walkers.forEach(function (w) { mover(w[0], w[1], 0.9 + Math.random() * 0.5, 'ping', Math.random() * 6, true); });
+  // pedestrians at the station shop and the warehouse apron
+  [[10, 63.5, 10, 69.5], [14, 63.5, 18, 69.5], [38, 44, 38, 62]].forEach(function (a, i) { mover(person(a[0], a[1], 0.14), [[a[0], a[1]], [a[2], a[3]]], 1.0, 'ping', i * 1.7, true); });
+  [[24, 18, 24, 32], [44, 18, 44, 32], [64, 20, 64, 30], [78, 20, 78, 32]].forEach(function (a, i) { mover(person(a[0], a[1], 0.14), [[a[0], a[1]], [a[2], a[3]]], 1.1, 'ping', i * 1.3, true); });
+  // fuel station cars: in on the west lane, pump, out on the east lane; one goes through the wash tunnel
+  var fcol = [0x9aa3a8, 0x7a2b2b, 0x2d4a6b, 0xd8d6d0, 0x1f2a36, 0xc9b27a];
+  [[17.5, 80, 0], [20.5, 84, 9], [17.5, 76, 18]].forEach(function (pp, i) {
+    mover(car(fcol[i]), [[8, 101], [8, 92], [8, pp[1]], [pp[0], pp[1], 5], [24, pp[1]], [24, 101]], 4.0, 'loop', pp[2]);
+  });
+  [0, 14].forEach(function (d, i) {
+    mover(car(fcol[3 + i]), [[8, 101], [8, 69], [31.5, 69], [31.5, 62, 2], [31.5, 49, 3], [31.5, 47.8], [37.5, 47.8], [37.5, 69], [37.5, 101]], 3.2, 'loop', 4 + d);
+  });
+  // warehouse trucks: enter on the truck lane (x 94.5), cross the apron, turn, leave on x 98
+  var tcol = [0x2d4a6b, 0x7a2b2b, 0xd4891c, 0x3a3a3a];
+  tcol.forEach(function (c, i) {
+    var tk = semi(c, i === 1), a = i % 2 ? [[94.5, 101], [94.5, 44], [88, 43], [10, 43, 4], [6, 38], [10, 32.7], [88, 32.7], [98, 36], [98, 101]] : [[94.5, 101], [94.5, 44], [88, 43], [48, 43, 3], [44, 38], [48, 32.7], [88, 32.7], [98, 36], [98, 101]];
+    mover(tk, a, 4.5, 'loop', i * 12);
+  });
+  function stepMovers(dt) {
+    movers.forEach(function (m) {
+      if (m.wait > 0) { m.wait -= dt; return; }
+      var n = m.pts.length, ni = m.i + m.dir, T = m.pts[ni];
+      if (!T) return;
+      var dx = T[0] - m.cx, dy = T[1] - m.cy, d = Math.sqrt(dx * dx + dy * dy), st = m.spd * dt;
+      if (d <= st) {
+        m.cx = T[0]; m.cy = T[1]; m.i = ni; if (T[2]) m.wait = T[2];
+        if (m.mode === 'loop' && ni === n - 1) { m.i = 0; m.cx = m.pts[0][0]; m.cy = m.pts[0][1]; m.wait = 6 + Math.random() * 10; m.g.visible = false; }
+        else if (m.mode === 'ping' && (ni === n - 1 || ni === 0)) { m.dir = -m.dir; m.wait = 1 + Math.random() * 3; }
+      } else { m.cx += dx / d * st; m.cy += dy / d * st; var ty = Math.atan2(dx, dy), df = Math.atan2(Math.sin(ty - m.rot), Math.cos(ty - m.rot)); m.rot += df * Math.min(1, dt * 5); m.g.rotation.y = m.rot; m.g.visible = true; }
+      m.g.position.x = m.cx - 50; m.g.position.z = m.cy - 50;
+      if (m.walk) { m.ph += dt * 7; m.g.position.y = m.y0 + Math.abs(Math.sin(m.ph)) * 0.07; m.g.rotation.z = Math.sin(m.ph) * 0.05; }
+    });
+  }
+  var clock = new THREE.Clock();
+  var frozen = false;
+  function frame() {
+    if (frozen) { requestAnimationFrame(frame); return; }
+    var dt = Math.min(clock.getDelta(), 0.05), k = 1 - Math.pow(0.001, dt);
+    ['tx', 'ty', 'tz', 'r', 'ph'].forEach(function (n) { cur[n] += (goal[n] - cur[n]) * k; });
+    var dth = goal.th - cur.th; dth = Math.atan2(Math.sin(dth), Math.cos(dth)); cur.th += dth * k;
+    camera.position.set(cur.tx + cur.r * Math.sin(cur.ph) * Math.sin(cur.th), cur.ty + cur.r * Math.cos(cur.ph), cur.tz + cur.r * Math.sin(cur.ph) * Math.cos(cur.th));
+    camera.lookAt(cur.tx, cur.ty, cur.tz);
+    traffic.forEach(function (t) { t.g.position.x += t.v * dt; if (t.g.position.x > 120) t.g.position.x = -120; if (t.g.position.x < -120) t.g.position.x = 120; });
+    stepMovers(dt);
+    if (sculpt) sculpt.rotation.y += dt * 0.5;
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  window.__n4 = { renderer: renderer, camera: camera, scene: scene, setMode: setMode, setInst: setInst, P: P, resize: resize, freeze: function (v) { frozen = v; if (!v) resize(); } };
+  function start() { build(); addTraffic(); setMode('dusk'); go('street', true); frame(); }
+  if (document.fonts && document.fonts.load) document.fonts.load('700 40px "Barlow Condensed"').then(start, start); else start();
+})();
+</script>
